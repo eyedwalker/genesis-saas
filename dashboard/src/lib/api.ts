@@ -313,15 +313,65 @@ export interface AssistantSummary {
   description: string;
   weight: number;
   is_active: boolean;
+  source: "catalog" | "custom";
 }
 
-export async function listAssistants(domain?: string) {
-  const params = domain ? `?domain=${domain}&active_only=true` : "?active_only=true";
+export interface AssistantDetail extends AssistantSummary {
+  system_prompt: string;
+}
+
+export async function listAssistants(domain?: string, source?: string) {
+  const params = new URLSearchParams();
+  if (domain) params.set("domain", domain);
+  if (source) params.set("source", source);
+  const qs = params.toString();
   return request<{
     assistants: AssistantSummary[];
     total: number;
     domains: Record<string, string>;
-  }>(`/api/v1/assistants${params}`);
+  }>(`/api/v1/assistants${qs ? `?${qs}` : ""}`);
+}
+
+export async function getAssistant(id: string) {
+  return request<AssistantDetail>(`/api/v1/assistants/${id}`);
+}
+
+export async function createAssistant(data: {
+  name: string;
+  domain: string;
+  description: string;
+  system_prompt: string;
+  weight?: number;
+  is_active?: boolean;
+}) {
+  return request<AssistantDetail>("/api/v1/assistants", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateAssistant(id: string, data: Partial<{
+  name: string;
+  domain: string;
+  description: string;
+  system_prompt: string;
+  weight: number;
+  is_active: boolean;
+}>) {
+  return request<AssistantDetail>(`/api/v1/assistants/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function forkAssistant(id: string) {
+  return request<AssistantDetail>(`/api/v1/assistants/${id}/fork`, {
+    method: "POST",
+  });
+}
+
+export async function deleteAssistant(id: string) {
+  return request<void>(`/api/v1/assistants/${id}`, { method: "DELETE" });
 }
 
 export async function listReviewAssistants() {

@@ -17,9 +17,11 @@ import { CreateFactoryModal } from "./CreateFactoryModal";
 import { BuildView } from "./BuildView";
 import { ConversationView } from "./ConversationView";
 import { AssistantPicker } from "./AssistantPicker";
+import { AssistantManager } from "./AssistantManager";
 
 type View =
   | { type: "factories" }
+  | { type: "assistants" }
   | { type: "pickAssistants"; factoryId: string; idea: string }
   | { type: "conversation"; buildId: string; state: ConversationState }
   | { type: "build"; buildId: string };
@@ -115,6 +117,12 @@ export function Dashboard() {
           )}
         </div>
         <div className="flex items-center gap-4">
+          <button
+            onClick={() => setView({ type: "assistants" })}
+            className="text-sm text-gray-500 hover:text-genesis-600 transition"
+          >
+            Assistants
+          </button>
           <span className="text-sm text-gray-600">
             {user?.name} ({user?.tenant_name})
           </span>
@@ -156,6 +164,15 @@ export function Dashboard() {
               onRefresh={refresh}
             />
           </>
+        )}
+
+        {view.type === "assistants" && (
+          <AssistantManager
+            onBack={() => {
+              setView({ type: "factories" });
+              refresh();
+            }}
+          />
         )}
 
         {view.type === "conversation" && (

@@ -250,6 +250,58 @@ export async function getActiveBuilds() {
   >("/api/v1/supervisor/active");
 }
 
+// ── Conversation (Guided Build) ──────────────────────────────────────────────
+
+export interface ConversationMessage {
+  role: "user" | "assistant" | "system";
+  content: string;
+  attachments?: { type: string; name: string; content: string }[];
+  timestamp: string;
+}
+
+export interface ConversationState {
+  build_id: string;
+  factory_id: string;
+  phase: string;
+  messages: ConversationMessage[];
+  context: Record<string, any>;
+  ready_to_build: boolean;
+}
+
+export async function startConversation(data: {
+  factory_id: string;
+  initial_idea: string;
+}) {
+  return request<ConversationState>("/api/v1/conversation/start", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function sendMessage(buildId: string, message: string, attachments?: any[]) {
+  return request<ConversationState>(`/api/v1/conversation/${buildId}/message`, {
+    method: "POST",
+    body: JSON.stringify({ message, attachments }),
+  });
+}
+
+export async function scanWebsite(buildId: string, url: string) {
+  return request<{ url: string; summary: string }>(`/api/v1/conversation/${buildId}/scan-website`, {
+    method: "POST",
+    body: JSON.stringify({ url }),
+  });
+}
+
+export async function getConversation(buildId: string) {
+  return request<ConversationState>(`/api/v1/conversation/${buildId}`);
+}
+
+export async function generateRequirements(buildId: string) {
+  return request<any>(`/api/v1/conversation/${buildId}/generate-requirements`, {
+    method: "POST",
+  });
+}
+
 // ── Review ───────────────────────────────────────────────────────────────────
 
 export async function reviewCode(data: {

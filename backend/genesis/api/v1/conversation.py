@@ -1,0 +1,589 @@
+"""Build conversation API — guided discovery-to-delivery experience.
+
+Instead of "type feature → build", this creates an interactive conversation
+where Claude helps the user think through what to build:
+
+1. User starts a build with a rough idea
+2. Claude interviews them (multi-turn)
+3. User can upload documents, images, mockups at any time
+4. User can paste website URLs for Claude to scan and learn from
+5. Claude synthesizes everything into requirements
+6. User reviews and refines before any code is generated
+"""
+
+from __future__ import annotations
+
+import base64
+import logging
+from datetime import datetime
+from typing import Any
+
+from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from genesis.auth.middleware import CurrentUser, get_current_user
+from genesis.db.models import Activity, Build, Factory
+from genesis.db.session import get_session
+
+logger = logging.getLogger(__name__)
+router = APIRouter()
+
+
+# ── Schemas ────────────────────────────────────────────────────────────────────
+
+
+class StartConversationRequest(BaseModel):
+    factory_id: str
+    initial_idea: str
+
+
+class SendMessageRequest(BaseModel):
+    message: str
+    attachments: list[dict[str, str]] | None = None  # [{type, name, content}]
+
+
+class ScanWebsiteRequest(BaseModel):
+    url: str
+    scan_type: str = "full"  # full, design_only, content_only
+
+
+class ConversationMessage(BaseModel):
+    role: str  # user, assistant, system
+    content: str
+    attachments: list[dict[str, str]] | None = None
+    timestamp: str
+
+
+class ConversationState(BaseModel):
+    build_id: str
+    factory_id: str
+    phase: str  # discovery, requirements, design, planning, building, reviewing
+    messages: list[ConversationMessage]
+    context: dict[str, Any]  # uploaded docs, scanned sites, etc.
+    ready_to_build: bool
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+
+def _get_conversation_log(build: Build) -> list[dict]:
+    """Get or initialize the conversation log from build's interview_log."""
+    return (build.interview_log or {}).get("messages", [])
+
+
+def _save_conversation(build: Build, messages: list[dict], context: dict | None = None):
+    """Save conversation state to build."""
+    log = build.interview_log or {}
+    log["messages"] = messages
+    if context:
+        log["context"] = {**log.get("context", {}), **context}
+    build.interview_log = log
+
+
+def _get_context(build: Build) -> dict:
+    """Get accumulated context (uploads, scans, etc.)."""
+    return (build.interview_log or {}).get("context", {})
+
+
+def _build_system_prompt(factory: Factory, build: Build) -> str:
+    """Build the system prompt for the discovery conversation."""
+    ctx = _get_context(build)
+    uploads = ctx.get("uploads", [])
+    scans = ctx.get("scans", [])
+
+    prompt = f"""You are a senior product consultant helping a user design a software application. You work for Genesis, an AI Software Factory.
+
+Project Context:
+- Factory: {factory.name}
+- Domain: {factory.domain}
+- Tech Stack: {factory.tech_stack or 'To be determined'}
+
+Your role in this conversation:
+1. UNDERSTAND what the user wants to build — ask smart questions
+2. EXPLORE edge cases, user personas, integrations they haven't thought of
+3. SYNTHESIZE their input into clear requirements
+4. DO NOT start building code — help them think through the product first
+
+Interview methodology:
+- WHO are the users? What are their roles and goals?
+- WHAT features do they need? What's the MVP vs nice-to-have?
+- WHY does this need to exist? What problem does it solve?
+- HOW should it look/feel? Any reference apps or designs?
+- CONSTRAINTS: compliance, integrations, performance, budget?
+
+Rules:
+- Ask ONE question at a time (don't overwhelm)
+- Reference any documents, images, or websites they've shared
+- When you have enough context, tell them you're ready to generate requirements
+- Be opinionated — suggest best practices, warn about common pitfalls
+- Keep responses concise and conversational"""
+
+    if uploads:
+        prompt += f"\n\nThe user has shared {len(uploads)} document(s)/image(s):"
+        for u in uploads:
+            prompt += f"\n- {u['name']} ({u['type']})"
+            if u.get("summary"):
+                prompt += f": {u['summary']}"
+
+    if scans:
+        prompt += f"\n\nThe user has shared {len(scans)} website(s) for reference:"
+        for s in scans:
+            prompt += f"\n- {s['url']}"
+            if s.get("summary"):
+                prompt += f": {s['summary']}"
+
+    return prompt
+
+
+# ── Endpoints ──────────────────────────────────────────────────────────────────
+
+
+@router.post("/start", response_model=ConversationState)
+async def start_conversation(
+    body: StartConversationRequest,
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """Start a new guided build conversation.
+
+    Creates a build in 'interviewing' state and begins the discovery process.
+    Claude will ask questions to understand what the user wants to build.
+    """
+    factory = await db.get(Factory, body.factory_id)
+    if not factory or factory.tenant_id != current.tenant_id:
+        raise HTTPException(404, "Factory not found")
+
+    # Create build in interviewing state
+    build = Build(
+        factory_id=body.factory_id,
+        requested_by_id=current.user_id,
+        feature_request=body.initial_idea,
+        build_mode="guided",
+        status="interviewing",
+    )
+    db.add(build)
+    await db.flush()
+
+    # Initialize conversation with Claude's first response
+    system_prompt = _build_system_prompt(factory, build)
+    initial_messages = [
+        {
+            "role": "user",
+            "content": body.initial_idea,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+    ]
+
+    # Get Claude's first response
+    try:
+        from genesis.agents.claude_client import run_agent
+
+        result = await run_agent(
+            prompt=f"A user wants to build: {body.initial_idea}\n\nThis is a {factory.domain} project using {factory.tech_stack or 'Python/FastAPI'}.\n\nStart by acknowledging their idea, then ask your first discovery question.",
+            system_prompt=system_prompt,
+            model="sonnet",
+            max_turns=1,
+        )
+        assistant_reply = result.result or "I'd love to help you build this! Let me ask a few questions to make sure we build exactly what you need. Who are the primary users of this application?"
+    except Exception as e:
+        logger.warning("Claude not available for interview, using fallback: %s", e)
+        assistant_reply = (
+            f"Great idea! I'd love to help you build this {factory.domain} application. "
+            f"Let me ask a few questions to make sure we design it right.\n\n"
+            f"First — who are the primary users of this application, and what's their main goal?"
+        )
+
+    initial_messages.append({
+        "role": "assistant",
+        "content": assistant_reply,
+        "timestamp": datetime.utcnow().isoformat(),
+    })
+
+    _save_conversation(build, initial_messages)
+    await db.flush()
+
+    # Log activity
+    db.add(Activity(
+        build_id=build.id, user_id=current.user_id,
+        type="build_created", stage="interviewing",
+        summary=f"Started guided build: {body.initial_idea[:100]}",
+    ))
+    await db.flush()
+
+    return ConversationState(
+        build_id=build.id,
+        factory_id=build.factory_id,
+        phase="discovery",
+        messages=[ConversationMessage(**m) for m in initial_messages],
+        context=_get_context(build),
+        ready_to_build=False,
+    )
+
+
+@router.post("/{build_id}/message", response_model=ConversationState)
+async def send_message(
+    build_id: str,
+    body: SendMessageRequest,
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """Send a message in the build conversation.
+
+    Claude will respond with follow-up questions, suggestions, or
+    indicate readiness to generate requirements.
+    """
+    build = await db.get(Build, build_id)
+    if not build:
+        raise HTTPException(404, "Build not found")
+    factory = await db.get(Factory, build.factory_id)
+    if not factory or factory.tenant_id != current.tenant_id:
+        raise HTTPException(404, "Build not found")
+
+    messages = _get_conversation_log(build)
+
+    # Add user message
+    user_msg = {
+        "role": "user",
+        "content": body.message,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+    if body.attachments:
+        user_msg["attachments"] = body.attachments
+        # Add attachment summaries to context
+        ctx = _get_context(build)
+        uploads = ctx.get("uploads", [])
+        for att in body.attachments:
+            uploads.append({
+                "name": att.get("name", "unnamed"),
+                "type": att.get("type", "document"),
+                "summary": att.get("content", "")[:500],
+            })
+        _save_conversation(build, messages, {"uploads": uploads})
+
+    messages.append(user_msg)
+
+    # Build conversation for Claude
+    system_prompt = _build_system_prompt(factory, build)
+    claude_messages = []
+    for m in messages:
+        role = m["role"]
+        if role in ("user", "assistant"):
+            claude_messages.append({"role": role, "content": m["content"]})
+
+    # Get Claude's response
+    try:
+        from genesis.agents.claude_client import run_agent
+
+        # Build the full conversation context
+        convo_text = "\n\n".join(
+            f"{'User' if m['role'] == 'user' else 'You'}: {m['content']}"
+            for m in claude_messages
+        )
+
+        result = await run_agent(
+            prompt=f"Continue this discovery conversation:\n\n{convo_text}\n\nRespond to the user's latest message. Ask follow-up questions if needed, or if you have enough context, say you're ready to generate requirements.",
+            system_prompt=system_prompt,
+            model="sonnet",
+            max_turns=1,
+        )
+        assistant_reply = result.result or "Could you tell me more about that?"
+    except Exception as e:
+        logger.warning("Claude not available: %s", e)
+        assistant_reply = "Thanks for sharing that! Could you tell me more about the user workflow you're envisioning?"
+
+    messages.append({
+        "role": "assistant",
+        "content": assistant_reply,
+        "timestamp": datetime.utcnow().isoformat(),
+    })
+
+    _save_conversation(build, messages)
+    await db.flush()
+
+    # Check if Claude thinks we're ready
+    ready = any(
+        phrase in assistant_reply.lower()
+        for phrase in [
+            "ready to generate", "enough context", "ready to create requirements",
+            "shall i generate", "let me draft", "ready to proceed",
+        ]
+    )
+
+    return ConversationState(
+        build_id=build.id,
+        factory_id=build.factory_id,
+        phase="discovery",
+        messages=[ConversationMessage(**m) for m in messages],
+        context=_get_context(build),
+        ready_to_build=ready,
+    )
+
+
+@router.post("/{build_id}/scan-website")
+async def scan_website(
+    build_id: str,
+    body: ScanWebsiteRequest,
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """Scan a website URL and add it as context for the build.
+
+    Claude will analyze the site's design, structure, and content
+    to inform the build.
+    """
+    build = await db.get(Build, build_id)
+    if not build:
+        raise HTTPException(404, "Build not found")
+    factory = await db.get(Factory, build.factory_id)
+    if not factory or factory.tenant_id != current.tenant_id:
+        raise HTTPException(404, "Build not found")
+
+    # Fetch and analyze the website
+    try:
+        from genesis.agents.claude_client import run_agent
+
+        result = await run_agent(
+            prompt=f"Analyze this website for a user who wants to build something similar: {body.url}\n\nDescribe:\n1. The overall purpose and target audience\n2. Key features and functionality\n3. UI/UX patterns (navigation, layout, color scheme)\n4. Tech stack clues (if visible)\n5. What works well and what could be improved",
+            system_prompt="You are a web analyst. Analyze the given website and provide a structured summary.",
+            model="sonnet",
+            tools=["WebFetch"],
+            max_turns=5,
+        )
+        scan_summary = result.result or f"Scanned {body.url}"
+    except Exception as e:
+        logger.warning("Website scan failed: %s", e)
+        scan_summary = f"Reference website: {body.url} (scan unavailable — Claude will reference this URL during build)"
+
+    # Add to context
+    ctx = _get_context(build)
+    scans = ctx.get("scans", [])
+    scans.append({
+        "url": body.url,
+        "scan_type": body.scan_type,
+        "summary": scan_summary,
+        "scanned_at": datetime.utcnow().isoformat(),
+    })
+
+    messages = _get_conversation_log(build)
+    messages.append({
+        "role": "system",
+        "content": f"Website scanned: {body.url}\n\n{scan_summary}",
+        "timestamp": datetime.utcnow().isoformat(),
+    })
+
+    _save_conversation(build, messages, {"scans": scans})
+    await db.flush()
+
+    return {
+        "url": body.url,
+        "summary": scan_summary,
+        "build_id": build.id,
+    }
+
+
+@router.post("/{build_id}/upload")
+async def upload_attachment(
+    build_id: str,
+    file: UploadFile = File(...),
+    description: str = Form(""),
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """Upload a document, image, or mockup to inform the build.
+
+    Supported: images (png, jpg, gif), documents (pdf, txt, md, docx),
+    design files, spreadsheets, etc.
+    """
+    build = await db.get(Build, build_id)
+    if not build:
+        raise HTTPException(404, "Build not found")
+    factory = await db.get(Factory, build.factory_id)
+    if not factory or factory.tenant_id != current.tenant_id:
+        raise HTTPException(404, "Build not found")
+
+    # Read file content
+    content = await file.read()
+    if len(content) > 10 * 1024 * 1024:  # 10MB limit
+        raise HTTPException(400, "File too large (max 10MB)")
+
+    file_type = file.content_type or "application/octet-stream"
+    is_image = file_type.startswith("image/")
+    is_text = file_type in (
+        "text/plain", "text/markdown", "text/csv",
+        "application/json", "application/xml",
+    )
+
+    # Build summary
+    if is_text:
+        text_content = content.decode("utf-8", errors="replace")[:5000]
+        summary = f"Document content:\n{text_content}"
+    elif is_image:
+        # Store as base64 for Claude to analyze later
+        b64 = base64.b64encode(content).decode()
+        summary = f"Image uploaded: {file.filename} ({file_type})"
+        # TODO: Use Claude vision to analyze the image
+    else:
+        summary = f"File uploaded: {file.filename} ({file_type}, {len(content)} bytes)"
+
+    if description:
+        summary = f"{description}\n\n{summary}"
+
+    # Add to context
+    ctx = _get_context(build)
+    uploads = ctx.get("uploads", [])
+    uploads.append({
+        "name": file.filename or "unnamed",
+        "type": file_type,
+        "size": len(content),
+        "description": description,
+        "summary": summary[:2000],
+        "uploaded_at": datetime.utcnow().isoformat(),
+    })
+
+    messages = _get_conversation_log(build)
+    messages.append({
+        "role": "system",
+        "content": f"File uploaded: {file.filename}\n{description or ''}",
+        "timestamp": datetime.utcnow().isoformat(),
+    })
+
+    _save_conversation(build, messages, {"uploads": uploads})
+    await db.flush()
+
+    return {
+        "filename": file.filename,
+        "type": file_type,
+        "size": len(content),
+        "build_id": build.id,
+    }
+
+
+@router.post("/{build_id}/generate-requirements")
+async def generate_requirements(
+    build_id: str,
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """Generate requirements from the conversation.
+
+    Called when user approves moving from discovery to requirements.
+    Synthesizes all conversation + uploads + scans into structured requirements.
+    """
+    build = await db.get(Build, build_id)
+    if not build:
+        raise HTTPException(404, "Build not found")
+    factory = await db.get(Factory, build.factory_id)
+    if not factory or factory.tenant_id != current.tenant_id:
+        raise HTTPException(404, "Build not found")
+
+    messages = _get_conversation_log(build)
+    ctx = _get_context(build)
+
+    # Build full context for requirements generation
+    convo_text = "\n\n".join(
+        f"{'User' if m['role'] == 'user' else 'Claude' if m['role'] == 'assistant' else 'System'}: {m['content']}"
+        for m in messages
+    )
+
+    uploads_text = ""
+    for u in ctx.get("uploads", []):
+        uploads_text += f"\n- {u['name']}: {u.get('summary', '')[:500]}"
+
+    scans_text = ""
+    for s in ctx.get("scans", []):
+        scans_text += f"\n- {s['url']}: {s.get('summary', '')[:500]}"
+
+    full_context = f"""Discovery Conversation:
+{convo_text}
+
+Uploaded Documents:{uploads_text or ' None'}
+
+Reference Websites:{scans_text or ' None'}
+
+Original Idea: {build.feature_request}"""
+
+    # Generate requirements
+    from genesis.pipeline.requirements_agent import generate_requirements as gen_reqs
+    from genesis.types import FactoryContext
+
+    factory_ctx = FactoryContext(
+        domain=factory.domain,
+        techStack=factory.tech_stack or "",
+        name=factory.name,
+    )
+
+    try:
+        reqs = await gen_reqs(
+            feature_request=full_context,
+            factory_context=factory_ctx,
+        )
+        build.requirements_data = reqs.model_dump(by_alias=True)
+        build.status = "requirements_review"
+    except Exception as e:
+        logger.error("Requirements generation failed: %s", e)
+        # Store what we have and let user retry
+        build.requirements_data = {
+            "summary": f"Generated from {len(messages)} conversation messages",
+            "stories": [],
+            "error": str(e),
+        }
+        build.status = "requirements_review"
+
+    await db.flush()
+
+    db.add(Activity(
+        build_id=build.id, user_id=current.user_id,
+        type="stage_completed", stage="interviewing",
+        summary=f"Requirements generated from {len(messages)} messages, {len(ctx.get('uploads', []))} uploads, {len(ctx.get('scans', []))} scans",
+    ))
+    await db.flush()
+
+    return {
+        "build_id": build.id,
+        "status": build.status,
+        "requirements": build.requirements_data,
+        "message_count": len(messages),
+        "upload_count": len(ctx.get("uploads", [])),
+        "scan_count": len(ctx.get("scans", [])),
+    }
+
+
+@router.get("/{build_id}", response_model=ConversationState)
+async def get_conversation(
+    build_id: str,
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """Get the current state of a build conversation."""
+    build = await db.get(Build, build_id)
+    if not build:
+        raise HTTPException(404, "Build not found")
+    factory = await db.get(Factory, build.factory_id)
+    if not factory or factory.tenant_id != current.tenant_id:
+        raise HTTPException(404, "Build not found")
+
+    messages = _get_conversation_log(build)
+    ctx = _get_context(build)
+
+    phase = "discovery"
+    if build.status == "requirements_review":
+        phase = "requirements"
+    elif build.status in ("design", "design_review"):
+        phase = "design"
+    elif build.status in ("planning", "plan_review"):
+        phase = "planning"
+    elif build.status == "building":
+        phase = "building"
+    elif build.status in ("reviewing", "code_review", "qa_review"):
+        phase = "reviewing"
+
+    return ConversationState(
+        build_id=build.id,
+        factory_id=build.factory_id,
+        phase=phase,
+        messages=[ConversationMessage(**m) for m in messages],
+        context=ctx,
+        ready_to_build=build.status != "interviewing",
+    )

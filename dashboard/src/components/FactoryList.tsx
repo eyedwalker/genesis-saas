@@ -42,10 +42,12 @@ function VibeScore({ score, grade }: { score: number | null; grade: string | nul
 
 function FactoryCard({
   factory,
+  onStartBuild,
   onSelectBuild,
   onRefresh,
 }: {
   factory: Factory;
+  onStartBuild: (factoryId: string, idea: string) => void;
   onSelectBuild: (id: string) => void;
   onRefresh: () => void;
 }) {
@@ -68,12 +70,8 @@ function FactoryCard({
     if (!newFeature.trim()) return;
     setLoading(true);
     try {
-      const build = await createBuild({
-        factory_id: factory.id,
-        feature_request: newFeature,
-      });
+      onStartBuild(factory.id, newFeature);
       setNewFeature("");
-      onSelectBuild(build.id);
     } catch (err: any) {
       alert(err.message);
     } finally {
@@ -130,7 +128,7 @@ function FactoryCard({
               type="text"
               value={newFeature}
               onChange={(e) => setNewFeature(e.target.value)}
-              placeholder="Describe a feature to build..."
+              placeholder="What do you want to build? (starts a guided conversation)"
               className="flex-1 px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-genesis-500 focus:outline-none"
               onKeyDown={(e) => e.key === "Enter" && handleNewBuild()}
             />
@@ -187,10 +185,12 @@ function FactoryCard({
 
 export function FactoryList({
   factories,
+  onStartBuild,
   onSelectBuild,
   onRefresh,
 }: {
   factories: Factory[];
+  onStartBuild: (factoryId: string, idea: string) => void;
   onSelectBuild: (id: string) => void;
   onRefresh: () => void;
 }) {
@@ -211,6 +211,7 @@ export function FactoryList({
         <FactoryCard
           key={f.id}
           factory={f}
+          onStartBuild={onStartBuild}
           onSelectBuild={onSelectBuild}
           onRefresh={onRefresh}
         />

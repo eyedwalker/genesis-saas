@@ -6,14 +6,21 @@ import {
   listFactories,
   getSupervisorStatus,
   clearToken,
+  startConversation,
+  getConversation,
   type Factory,
   type SupervisorStatus,
+  type ConversationState,
 } from "@/lib/api";
 import { FactoryList } from "./FactoryList";
 import { CreateFactoryModal } from "./CreateFactoryModal";
 import { BuildView } from "./BuildView";
+import { ConversationView } from "./ConversationView";
 
-type View = { type: "factories" } | { type: "build"; buildId: string };
+type View =
+  | { type: "factories" }
+  | { type: "conversation"; buildId: string; state: ConversationState }
+  | { type: "build"; buildId: string };
 
 export function Dashboard() {
   const [user, setUser] = useState<any>(null);
@@ -42,6 +49,31 @@ export function Dashboard() {
     refresh();
   }, []);
 
+  const handleStartBuild = async (factoryId: string, idea: string) => {
+    try {
+      const state = await startConversation({
+        factory_id: factoryId,
+        initial_idea: idea,
+      });
+      setView({ type: "conversation", buildId: state.build_id, state });
+    } catch (err: any) {
+      alert(err.message);
+    }
+  };
+
+  const handleResumeBuild = async (buildId: string) => {
+    try {
+      const state = await getConversation(buildId);
+      if (state.phase === "discovery") {
+        setView({ type: "conversation", buildId, state });
+      } else {
+        setView({ type: "build", buildId });
+      }
+    } catch {
+      setView({ type: "build", buildId });
+    }
+  };
+
   return (
     <div className="min-h-screen">
       {/* Header */}
@@ -49,7 +81,10 @@ export function Dashboard() {
         <div className="flex items-center gap-4">
           <h1
             className="text-xl font-bold text-genesis-900 cursor-pointer"
-            onClick={() => setView({ type: "factories" })}
+            onClick={() => {
+              setView({ type: "factories" });
+              refresh();
+            }}
           >
             Genesis
           </h1>
@@ -83,7 +118,7 @@ export function Dashboard() {
       </header>
 
       {/* Main content */}
-      <main className="max-w-7xl mx-auto px-6 py-8">
+      <main className={view.type === "conversation" ? "" : "max-w-7xl mx-auto px-6 py-8"}>
         {view.type === "factories" && (
           <>
             <div className="flex items-center justify-between mb-6">
@@ -99,22 +134,37 @@ export function Dashboard() {
             </div>
             <FactoryList
               factories={factories}
-              onSelectBuild={(buildId) =>
-                setView({ type: "build", buildId })
-              }
+              onStartBuild={handleStartBuild}
+              onSelectBuild={handleResumeBuild}
               onRefresh={refresh}
             />
           </>
         )}
 
-        {view.type === "build" && (
-          <BuildView
+        {view.type === "conversation" && (
+          <ConversationView
             buildId={view.buildId}
+            initialState={view.state}
+            onRequirementsGenerated={(buildId) => {
+              setView({ type: "build", buildId });
+            }}
             onBack={() => {
               setView({ type: "factories" });
               refresh();
             }}
           />
+        )}
+
+        {view.type === "build" && (
+          <div className="px-6 py-8">
+            <BuildView
+              buildId={view.buildId}
+              onBack={() => {
+                setView({ type: "factories" });
+                refresh();
+              }}
+            />
+          </div>
         )}
       </main>
 

@@ -2160,3 +2160,39 @@ ALL_ASSISTANTS: list[AssistantConfig] = [
     _jtbd_requirements,
     _lean_requirements,
 ]
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+
+def get_assistants_by_domain(domain: str) -> list:
+    return [a for a in ALL_ASSISTANTS if a.domain == domain and a.is_active]
+
+
+def get_assistants_by_ids(ids: list[str]) -> list:
+    id_set = set(ids)
+    return [a for a in ALL_ASSISTANTS if a.id in id_set]
+
+
+def get_active_assistants() -> list:
+    return [a for a in ALL_ASSISTANTS if a.is_active]
+
+
+def get_discovery_assistants() -> list:
+    return [a for a in ALL_ASSISTANTS if a.domain in ("project", "ba") and a.is_active]
+
+
+def get_review_assistants() -> list:
+    return [a for a in ALL_ASSISTANTS if a.domain not in ("project", "ba") and a.is_active]
+
+
+DOMAIN_LABELS: dict[str, str] = {
+    "quality": "Quality Assurance",
+    "architecture": "Architecture",
+    "compliance": "Security & Compliance",
+    "infrastructure": "Infrastructure & DevOps",
+    "frontend": "Frontend & UX",
+    "business": "Business",
+    "project": "Project Management (Discovery)",
+    "ba": "Business Analysis (Discovery)",
+}

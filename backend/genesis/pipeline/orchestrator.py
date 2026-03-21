@@ -135,6 +135,7 @@ async def advance_pipeline(
 
         # Log activity
         activity = Activity(
+            tenant_id=build.tenant_id,
             build_id=build.id,
             type="stage_completed",
             stage=current_stage.value,

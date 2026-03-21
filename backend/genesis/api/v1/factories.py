@@ -127,6 +127,7 @@ async def create_factory(
 
     # Add creator as OWNER
     member = FactoryMember(
+        tenant_id=current.tenant_id,
         factory_id=factory.id,
         user_id=current.user_id,
         role="owner",

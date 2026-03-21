@@ -1,4 +1,9 @@
-"""SQLAlchemy ORM models — ported from wabah Prisma schema (Genesis models)."""
+"""SQLAlchemy ORM models — multi-tenant with direct tenant_id on every table.
+
+SECURITY: Every table has a direct tenant_id column for Row-Level Security.
+No table requires a JOIN to determine tenant ownership.
+This enables PostgreSQL RLS policies that work without JOINs.
+"""
 
 from __future__ import annotations
 
@@ -20,7 +25,6 @@ from sqlalchemy import (
 from sqlalchemy import JSON as _JSON
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-# Use PostgreSQL JSONB when available, fall back to generic JSON (for SQLite tests)
 try:
     from sqlalchemy.dialects.postgresql import JSONB
 except ImportError:
@@ -37,7 +41,7 @@ class Base(DeclarativeBase):
     type_annotation_map = {dict[str, Any]: _JSON}
 
 
-# ── Tenant (new for SaaS) ─────────────────────────────────────────────────────
+# ── Tenant ─────────────────────────────────────────────────────────────────────
 
 
 class Tenant(Base):
@@ -56,10 +60,12 @@ class Tenant(Base):
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
     )
 
-    # Relations
     users: Mapped[list[TenantUser]] = relationship(back_populates="tenant")
     factories: Mapped[list[Factory]] = relationship(back_populates="tenant")
     assistants: Mapped[list[Assistant]] = relationship(back_populates="tenant")
+    assistant_configs: Mapped[list[TenantAssistantConfig]] = relationship(
+        back_populates="tenant"
+    )
 
 
 # ── User ───────────────────────────────────────────────────────────────────────
@@ -109,7 +115,6 @@ class Factory(Base):
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
     )
 
-    # Relations
     tenant: Mapped[Tenant] = relationship(back_populates="factories")
     builds: Mapped[list[Build]] = relationship(back_populates="factory")
     members: Mapped[list[FactoryMember]] = relationship(back_populates="factory")
@@ -131,6 +136,7 @@ class FactoryMember(Base):
     __tablename__ = "factory_members"
 
     id: Mapped[str] = mapped_column(String(25), primary_key=True, default=_cuid)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"))  # DIRECT
     factory_id: Mapped[str] = mapped_column(ForeignKey("factories.id"))
     user_id: Mapped[str] = mapped_column(ForeignKey("tenant_users.id"))
     role: Mapped[str] = mapped_column(String(20), default="reviewer")
@@ -141,7 +147,7 @@ class FactoryMember(Base):
 
     __table_args__ = (
         UniqueConstraint("factory_id", "user_id", name="uq_factory_member"),
-        Index("ix_factory_members_factory", "factory_id"),
+        Index("ix_factory_members_tenant", "tenant_id"),
     )
 
 
@@ -152,13 +158,13 @@ class Build(Base):
     __tablename__ = "builds"
 
     id: Mapped[str] = mapped_column(String(25), primary_key=True, default=_cuid)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"))  # DIRECT
     factory_id: Mapped[str] = mapped_column(ForeignKey("factories.id"))
     requested_by_id: Mapped[str | None] = mapped_column(
         ForeignKey("tenant_users.id"), nullable=True
     )
     feature_request: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(30), default="requirements")
-    # Pipeline stage data (JSON blobs)
     interview_log: Mapped[dict[str, Any] | None] = mapped_column(_JSON, nullable=True)
     requirements_data: Mapped[dict[str, Any] | None] = mapped_column(
         _JSON, nullable=True
@@ -171,33 +177,27 @@ class Build(Base):
     original_file_map: Mapped[dict[str, Any] | None] = mapped_column(
         _JSON, nullable=True
     )
-    # Review
     vibe_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     vibe_grade: Mapped[str | None] = mapped_column(String(5), nullable=True)
     findings: Mapped[dict[str, Any] | None] = mapped_column(_JSON, nullable=True)
     iterations: Mapped[int] = mapped_column(Integer, default=0)
-    # Lineage
     parent_build_id: Mapped[str | None] = mapped_column(
         ForeignKey("builds.id"), nullable=True
     )
     refine_feedback: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Export
     exported_repo: Mapped[str | None] = mapped_column(String(500), nullable=True)
     exported_branch: Mapped[str | None] = mapped_column(String(255), nullable=True)
     pr_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    # Agent provisioning
     workspace_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     provisioned_agents: Mapped[dict[str, Any] | None] = mapped_column(
         _JSON, nullable=True
     )
     build_mode: Mapped[str] = mapped_column(String(20), default="feature")
-    # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
     )
 
-    # Relations
     factory: Mapped[Factory] = relationship(back_populates="builds")
     requested_by: Mapped[TenantUser | None] = relationship()
     parent_build: Mapped[Build | None] = relationship(
@@ -213,6 +213,7 @@ class Build(Base):
     )
 
     __table_args__ = (
+        Index("ix_builds_tenant", "tenant_id"),
         Index("ix_builds_factory", "factory_id"),
         Index("ix_builds_status", "status"),
     )
@@ -225,6 +226,7 @@ class Approval(Base):
     __tablename__ = "approvals"
 
     id: Mapped[str] = mapped_column(String(25), primary_key=True, default=_cuid)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"))  # DIRECT
     build_id: Mapped[str] = mapped_column(ForeignKey("builds.id"))
     user_id: Mapped[str] = mapped_column(ForeignKey("tenant_users.id"))
     type: Mapped[str] = mapped_column(String(20))
@@ -240,6 +242,7 @@ class Approval(Base):
 
     __table_args__ = (
         UniqueConstraint("build_id", "user_id", "type", name="uq_approval"),
+        Index("ix_approvals_tenant", "tenant_id"),
         Index("ix_approvals_build", "build_id"),
     )
 
@@ -251,6 +254,7 @@ class BuildComment(Base):
     __tablename__ = "build_comments"
 
     id: Mapped[str] = mapped_column(String(25), primary_key=True, default=_cuid)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"))  # DIRECT
     build_id: Mapped[str] = mapped_column(ForeignKey("builds.id"))
     user_id: Mapped[str] = mapped_column(ForeignKey("tenant_users.id"))
     file_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
@@ -269,8 +273,8 @@ class BuildComment(Base):
     )
 
     __table_args__ = (
+        Index("ix_build_comments_tenant", "tenant_id"),
         Index("ix_build_comments_build", "build_id"),
-        Index("ix_build_comments_parent", "parent_id"),
     )
 
 
@@ -281,6 +285,7 @@ class Activity(Base):
     __tablename__ = "activities"
 
     id: Mapped[str] = mapped_column(String(25), primary_key=True, default=_cuid)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"))  # DIRECT
     build_id: Mapped[str] = mapped_column(ForeignKey("builds.id"))
     user_id: Mapped[str | None] = mapped_column(
         ForeignKey("tenant_users.id"), nullable=True
@@ -297,6 +302,7 @@ class Activity(Base):
     user: Mapped[TenantUser | None] = relationship()
 
     __table_args__ = (
+        Index("ix_activities_tenant", "tenant_id"),
         Index("ix_activities_build", "build_id"),
         Index("ix_activities_build_time", "build_id", "created_at"),
     )
@@ -309,6 +315,7 @@ class WorkItem(Base):
     __tablename__ = "work_items"
 
     id: Mapped[str] = mapped_column(String(25), primary_key=True, default=_cuid)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"))  # DIRECT
     build_id: Mapped[str] = mapped_column(ForeignKey("builds.id"))
     type: Mapped[str] = mapped_column(String(30))
     parent_id: Mapped[str | None] = mapped_column(
@@ -338,8 +345,8 @@ class WorkItem(Base):
     assignee: Mapped[TenantUser | None] = relationship()
 
     __table_args__ = (
+        Index("ix_work_items_tenant", "tenant_id"),
         Index("ix_work_items_build", "build_id"),
-        Index("ix_work_items_build_type", "build_id", "type"),
     )
 
 
@@ -350,6 +357,7 @@ class Document(Base):
     __tablename__ = "documents"
 
     id: Mapped[str] = mapped_column(String(25), primary_key=True, default=_cuid)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"))  # DIRECT
     build_id: Mapped[str] = mapped_column(ForeignKey("builds.id"))
     type: Mapped[str] = mapped_column(String(30))
     title: Mapped[str] = mapped_column(String(500))
@@ -364,8 +372,8 @@ class Document(Base):
     build: Mapped[Build] = relationship(back_populates="documents")
 
     __table_args__ = (
+        Index("ix_documents_tenant", "tenant_id"),
         Index("ix_documents_build", "build_id"),
-        Index("ix_documents_build_type", "build_id", "type"),
     )
 
 
@@ -376,6 +384,7 @@ class Deployment(Base):
     __tablename__ = "deployments"
 
     id: Mapped[str] = mapped_column(String(25), primary_key=True, default=_cuid)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"))  # DIRECT
     build_id: Mapped[str] = mapped_column(ForeignKey("builds.id"))
     factory_id: Mapped[str] = mapped_column(ForeignKey("factories.id"))
     tier: Mapped[str] = mapped_column(String(20), default="shared")
@@ -386,12 +395,10 @@ class Deployment(Base):
     container_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
     host_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
     container_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    # AWS fields
     ecr_image_uri: Mapped[str | None] = mapped_column(String(500), nullable=True)
     amplify_app_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     s3_bucket_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     cloudfront_domain: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    # Health
     health_check_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     last_health_check: Mapped[datetime | None] = mapped_column(
         DateTime, nullable=True
@@ -412,8 +419,8 @@ class Deployment(Base):
     )
 
     __table_args__ = (
+        Index("ix_deployments_tenant", "tenant_id"),
         Index("ix_deployments_build", "build_id"),
-        Index("ix_deployments_factory", "factory_id"),
         Index("ix_deployments_status", "status"),
     )
 
@@ -425,6 +432,7 @@ class Invitation(Base):
     __tablename__ = "invitations"
 
     id: Mapped[str] = mapped_column(String(25), primary_key=True, default=_cuid)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"))  # DIRECT
     factory_id: Mapped[str] = mapped_column(ForeignKey("factories.id"))
     email: Mapped[str] = mapped_column(String(255))
     role: Mapped[str] = mapped_column(String(20), default="reviewer")
@@ -440,11 +448,12 @@ class Invitation(Base):
 
     __table_args__ = (
         UniqueConstraint("factory_id", "email", name="uq_invitation_email"),
+        Index("ix_invitations_tenant", "tenant_id"),
         Index("ix_invitations_token", "token"),
     )
 
 
-# ── Assistant ──────────────────────────────────────────────────────────────────
+# ── Assistant (custom per-tenant) ─────────────────────────────────────────────
 
 
 class Assistant(Base):
@@ -469,4 +478,39 @@ class Assistant(Base):
     __table_args__ = (
         Index("ix_assistants_tenant", "tenant_id"),
         Index("ix_assistants_tenant_domain", "tenant_id", "domain"),
+    )
+
+
+# ── Tenant Assistant Config (enable/disable/customize catalog assistants) ─────
+
+
+class TenantAssistantConfig(Base):
+    """Per-tenant configuration for catalog assistants.
+
+    Allows tenants to:
+    - Enable/disable specific catalog assistants
+    - Override weights for scoring
+    - Add custom system prompt additions
+    - Set which assistants are used by default in builds
+    """
+
+    __tablename__ = "tenant_assistant_configs"
+
+    id: Mapped[str] = mapped_column(String(25), primary_key=True, default=_cuid)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"))
+    assistant_id: Mapped[str] = mapped_column(String(50))  # References catalog ID
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    weight_override: Mapped[float | None] = mapped_column(Float, nullable=True)
+    prompt_addition: Mapped[str | None] = mapped_column(Text, nullable=True)
+    use_by_default: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    tenant: Mapped[Tenant] = relationship(back_populates="assistant_configs")
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "assistant_id", name="uq_tenant_assistant"),
+        Index("ix_tenant_assistant_configs_tenant", "tenant_id"),
     )

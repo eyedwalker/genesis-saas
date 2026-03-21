@@ -193,6 +193,7 @@ async def start_conversation(
 
     # Create build in interviewing state
     build = Build(
+        tenant_id=current.tenant_id,
         factory_id=body.factory_id,
         requested_by_id=current.user_id,
         feature_request=body.initial_idea,
@@ -243,6 +244,7 @@ async def start_conversation(
 
     # Log activity
     db.add(Activity(
+        tenant_id=current.tenant_id,
         build_id=build.id, user_id=current.user_id,
         type="build_created", stage="interviewing",
         summary=f"Started guided build: {body.initial_idea[:100]}",
@@ -571,6 +573,7 @@ Original Idea: {build.feature_request}"""
     await db.flush()
 
     db.add(Activity(
+        tenant_id=current.tenant_id,
         build_id=build.id, user_id=current.user_id,
         type="stage_completed", stage="interviewing",
         summary=f"Requirements generated from {len(messages)} messages, {len(ctx.get('uploads', []))} uploads, {len(ctx.get('scans', []))} scans",

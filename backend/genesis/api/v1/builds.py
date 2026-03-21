@@ -168,6 +168,7 @@ async def create_build(
         raise HTTPException(404, "Factory not found")
 
     build = Build(
+        tenant_id=current.tenant_id,
         factory_id=body.factory_id,
         requested_by_id=current.user_id,
         feature_request=body.feature_request,
@@ -178,6 +179,7 @@ async def create_build(
     await db.flush()
 
     activity = Activity(
+        tenant_id=current.tenant_id,
         build_id=build.id,
         user_id=current.user_id,
         type="build_created",
@@ -292,6 +294,7 @@ async def approve_build(
 
     # Record approval
     approval = Approval(
+        tenant_id=current.tenant_id,
         build_id=build.id,
         user_id=current.user_id,
         type=body.type,
@@ -301,6 +304,7 @@ async def approve_build(
     db.add(approval)
 
     activity = Activity(
+        tenant_id=current.tenant_id,
         build_id=build.id,
         user_id=current.user_id,
         type="approval_submitted",

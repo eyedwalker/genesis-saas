@@ -9,6 +9,7 @@ import {
   type ConversationState,
   type ConversationMessage,
 } from "@/lib/api";
+import { DiscoveryBoard } from "./DiscoveryBoard";
 
 function MessageBubble({ msg }: { msg: ConversationMessage }) {
   const isUser = msg.role === "user";
@@ -176,7 +177,9 @@ export function ConversationView({
   const scans = state.context?.scans || [];
 
   return (
-    <div className="flex flex-col h-[calc(100vh-120px)]">
+    <div className="flex h-[calc(100vh-120px)]">
+    {/* Main conversation */}
+    <div className="flex flex-col flex-1">
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b bg-white">
         <div className="flex items-center gap-3">
@@ -335,6 +338,10 @@ export function ConversationView({
           </button>
         </div>
       </div>
+    </div>
+
+    {/* Discovery Board sidebar */}
+    <DiscoveryBoard state={state} />
     </div>
   );
 }

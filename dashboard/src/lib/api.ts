@@ -1,0 +1,270 @@
+/**
+ * Genesis API client — all backend calls go through here.
+ */
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+let authToken: string | null = null;
+
+export function setToken(token: string) {
+  authToken = token;
+  if (typeof window !== "undefined") {
+    localStorage.setItem("genesis_token", token);
+  }
+}
+
+export function getToken(): string | null {
+  if (authToken) return authToken;
+  if (typeof window !== "undefined") {
+    authToken = localStorage.getItem("genesis_token");
+  }
+  return authToken;
+}
+
+export function clearToken() {
+  authToken = null;
+  if (typeof window !== "undefined") {
+    localStorage.removeItem("genesis_token");
+  }
+}
+
+async function request<T>(
+  path: string,
+  options: RequestInit = {}
+): Promise<T> {
+  const token = getToken();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(options.headers as Record<string, string> || {}),
+  };
+
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...options,
+    headers,
+  });
+
+  if (res.status === 401) {
+    clearToken();
+    if (typeof window !== "undefined") {
+      window.location.href = "/login";
+    }
+    throw new Error("Unauthorized");
+  }
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || `API error: ${res.status}`);
+  }
+
+  return res.json();
+}
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+
+export async function register(data: {
+  tenant_name: string;
+  tenant_slug: string;
+  email: string;
+  password: string;
+  name: string;
+}) {
+  const res = await request<{
+    access_token: string;
+    tenant_id: string;
+    user_id: string;
+    email: string;
+  }>("/api/v1/auth/register", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+  setToken(res.access_token);
+  return res;
+}
+
+export async function login(data: {
+  email: string;
+  password: string;
+  tenant_slug: string;
+}) {
+  const res = await request<{
+    access_token: string;
+    tenant_id: string;
+    user_id: string;
+  }>("/api/v1/auth/login", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+  setToken(res.access_token);
+  return res;
+}
+
+export async function getMe() {
+  return request<{
+    user_id: string;
+    tenant_id: string;
+    tenant_name: string;
+    email: string;
+    name: string;
+    is_admin: boolean;
+  }>("/api/v1/auth/me");
+}
+
+// ── Factories ────────────────────────────────────────────────────────────────
+
+export interface Factory {
+  id: string;
+  name: string;
+  domain: string;
+  description: string | null;
+  tech_stack: string | null;
+  status: string;
+  fast_track: boolean;
+  github_repo: string | null;
+  build_count: number;
+  avg_vibe_score: number | null;
+  created_at: string;
+}
+
+export async function listFactories() {
+  return request<{ factories: Factory[]; total: number }>(
+    "/api/v1/factories"
+  );
+}
+
+export async function createFactory(data: {
+  name: string;
+  domain: string;
+  description?: string;
+  tech_stack?: string;
+  fast_track?: boolean;
+}) {
+  return request<Factory>("/api/v1/factories", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function getFactory(id: string) {
+  return request<Factory>(`/api/v1/factories/${id}`);
+}
+
+// ── Builds ───────────────────────────────────────────────────────────────────
+
+export interface Build {
+  id: string;
+  factory_id: string;
+  feature_request: string;
+  status: string;
+  vibe_score: number | null;
+  vibe_grade: string | null;
+  iterations: number;
+  build_mode: string;
+  file_map: Record<string, string> | null;
+  findings: any | null;
+  requirements_data: any | null;
+  design_data: any | null;
+  plan: any | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function listBuilds(factoryId?: string) {
+  const params = factoryId ? `?factory_id=${factoryId}` : "";
+  return request<{ builds: Build[]; total: number }>(
+    `/api/v1/builds${params}`
+  );
+}
+
+export async function createBuild(data: {
+  factory_id: string;
+  feature_request: string;
+  build_mode?: string;
+  fast_track?: boolean;
+}) {
+  return request<Build>("/api/v1/builds", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function getBuild(id: string) {
+  return request<Build>(`/api/v1/builds/${id}`);
+}
+
+export async function advanceBuild(id: string, fastTrack = false) {
+  return request<Build>(`/api/v1/builds/${id}/advance`, {
+    method: "POST",
+    body: JSON.stringify({ fast_track: fastTrack }),
+  });
+}
+
+export async function runBuild(id: string, fastTrack = false) {
+  return request<Build>(`/api/v1/builds/${id}/run`, {
+    method: "POST",
+    body: JSON.stringify({ fast_track: fastTrack }),
+  });
+}
+
+export async function approveBuild(
+  id: string,
+  data: { type: string; decision: string; comment?: string }
+) {
+  return request<Build>(`/api/v1/builds/${id}/approve`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+// ── Supervisor ───────────────────────────────────────────────────────────────
+
+export interface SupervisorStatus {
+  tenant_id: string;
+  active_builds: number;
+  max_concurrent: number;
+  queued_builds: number;
+  total_factories: number;
+  total_builds: number;
+  credits_used: number;
+  credits_limit: number;
+  builds_by_status: Record<string, number>;
+}
+
+export async function getSupervisorStatus() {
+  return request<SupervisorStatus>("/api/v1/supervisor/status");
+}
+
+export async function getActiveBuilds() {
+  return request<
+    {
+      build_id: string;
+      factory_id: string;
+      factory_name: string;
+      feature_request: string;
+      status: string;
+      vibe_score: number | null;
+      created_at: string;
+    }[]
+  >("/api/v1/supervisor/active");
+}
+
+// ── Review ───────────────────────────────────────────────────────────────────
+
+export async function reviewCode(data: {
+  code: string;
+  language?: string;
+  context?: string;
+}) {
+  return request<{
+    vibe_score: number;
+    grade: string;
+    summary: string;
+    findings_count: number;
+    findings: any[];
+    recommendations: string[];
+    assistants_used: string[];
+  }>("/api/v1/review", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}

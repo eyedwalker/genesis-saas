@@ -130,9 +130,17 @@ BUILTIN_ASSISTANTS: list[AssistantConfig] = [
 
 
 def get_assistants_by_ids(ids: list[str] | None = None) -> list[AssistantConfig]:
+    """Get assistants — uses full catalog if available, falls back to built-ins."""
+    try:
+        from genesis.assistants.catalog import ALL_ASSISTANTS as FULL_CATALOG
+        source = FULL_CATALOG
+    except ImportError:
+        source = BUILTIN_ASSISTANTS
+
     if not ids:
-        return [a for a in BUILTIN_ASSISTANTS if a.is_active]
-    return [a for a in BUILTIN_ASSISTANTS if a.id in ids]
+        # Return active review assistants (exclude discovery domains)
+        return [a for a in source if a.is_active and a.domain not in ("project", "ba")]
+    return [a for a in source if a.id in ids]
 
 
 async def _run_assistant_review(

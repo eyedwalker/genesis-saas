@@ -37,6 +37,7 @@ router = APIRouter()
 class StartConversationRequest(BaseModel):
     factory_id: str
     initial_idea: str
+    assistant_ids: list[str] | None = None  # Which assistants guide this build
 
 
 class SendMessageRequest(BaseModel):
@@ -87,8 +88,28 @@ def _get_context(build: Build) -> dict:
     return (build.interview_log or {}).get("context", {})
 
 
+def _get_discovery_assistants() -> str:
+    """Get discovery-focused assistant methodologies to guide the interview."""
+    try:
+        from genesis.assistants.catalog import ALL_ASSISTANTS
+        discovery_domains = {"project", "ba"}
+        discovery_assistants = [a for a in ALL_ASSISTANTS if a.domain in discovery_domains and a.is_active]
+        if discovery_assistants:
+            parts = ["\n\nYou are guided by these discovery methodologies:\n"]
+            for a in discovery_assistants:
+                parts.append(f"### {a.name}\n{a.system_prompt}\n")
+            return "\n".join(parts)
+    except ImportError:
+        pass
+    return ""
+
+
 def _build_system_prompt(factory: Factory, build: Build) -> str:
-    """Build the system prompt for the discovery conversation."""
+    """Build the system prompt for the discovery conversation.
+
+    Incorporates methodologies from discovery assistants (Product Discovery/Cagan,
+    Shape Up, JTBD, Lean Requirements) to guide the interview.
+    """
     ctx = _get_context(build)
     uploads = ctx.get("uploads", [])
     scans = ctx.get("scans", [])
@@ -101,24 +122,29 @@ Project Context:
 - Tech Stack: {factory.tech_stack or 'To be determined'}
 
 Your role in this conversation:
-1. UNDERSTAND what the user wants to build — ask smart questions
-2. EXPLORE edge cases, user personas, integrations they haven't thought of
-3. SYNTHESIZE their input into clear requirements
-4. DO NOT start building code — help them think through the product first
+1. UNDERSTAND the real problem — not just what the user says they want to build, but WHY
+2. EXPLORE who the users are, what they're struggling with, what outcomes matter
+3. CHALLENGE assumptions — ask for evidence, push back on vague answers
+4. SHAPE the scope — help define what's in and what's out for v1
+5. DO NOT start building code — help them think through the product first
 
-Interview methodology:
-- WHO are the users? What are their roles and goals?
-- WHAT features do they need? What's the MVP vs nice-to-have?
-- WHY does this need to exist? What problem does it solve?
-- HOW should it look/feel? Any reference apps or designs?
-- CONSTRAINTS: compliance, integrations, performance, budget?
+You blend multiple discovery frameworks:
+- PRODUCT DISCOVERY (Cagan): Focus on the problem space, assess value/usability/feasibility/viability risks
+- JOBS-TO-BE-DONE (Christensen/Moesta): Uncover the real job customers are hiring this product to do
+- SHAPE UP (Singer): Define appetite (time boundary), identify rabbit holes, establish no-gos
+- LEAN STARTUP (Ries): Frame as testable hypothesis, find riskiest assumption, define minimum viable scope
 
 Rules:
 - Ask ONE question at a time (don't overwhelm)
+- When a user describes a solution, redirect to the underlying problem
 - Reference any documents, images, or websites they've shared
-- When you have enough context, tell them you're ready to generate requirements
-- Be opinionated — suggest best practices, warn about common pitfalls
-- Keep responses concise and conversational"""
+- Be Socratic — help them think, don't interrogate
+- Push back gently on vague answers: "Can you give me a specific example?"
+- When you have enough context (problem validated, persona clear, scope bounded), tell them you're ready to generate requirements
+- Be opinionated — suggest best practices, warn about common pitfalls"""
+
+    # Add discovery assistant methodologies
+    prompt += _get_discovery_assistants()
 
     if uploads:
         prompt += f"\n\nThe user has shared {len(uploads)} document(s)/image(s):"
@@ -155,6 +181,16 @@ async def start_conversation(
     if not factory or factory.tenant_id != current.tenant_id:
         raise HTTPException(404, "Factory not found")
 
+    # Resolve selected assistants
+    selected_assistants = body.assistant_ids
+    if not selected_assistants:
+        # Default: all active assistants
+        try:
+            from genesis.assistants.catalog import get_active_assistants
+            selected_assistants = [a.id for a in get_active_assistants()]
+        except ImportError:
+            selected_assistants = []
+
     # Create build in interviewing state
     build = Build(
         factory_id=body.factory_id,
@@ -162,6 +198,7 @@ async def start_conversation(
         feature_request=body.initial_idea,
         build_mode="guided",
         status="interviewing",
+        interview_log={"context": {"selected_assistants": selected_assistants}},
     )
     db.add(build)
     await db.flush()

@@ -271,6 +271,7 @@ export interface ConversationState {
 export async function startConversation(data: {
   factory_id: string;
   initial_idea: string;
+  assistant_ids?: string[];
 }) {
   return request<ConversationState>("/api/v1/conversation/start", {
     method: "POST",
@@ -300,6 +301,39 @@ export async function generateRequirements(buildId: string) {
   return request<any>(`/api/v1/conversation/${buildId}/generate-requirements`, {
     method: "POST",
   });
+}
+
+// ── Assistants ───────────────────────────────────────────────────────────────
+
+export interface AssistantSummary {
+  id: string;
+  name: string;
+  domain: string;
+  domain_label: string;
+  description: string;
+  weight: number;
+  is_active: boolean;
+}
+
+export async function listAssistants(domain?: string) {
+  const params = domain ? `?domain=${domain}&active_only=true` : "?active_only=true";
+  return request<{
+    assistants: AssistantSummary[];
+    total: number;
+    domains: Record<string, string>;
+  }>(`/api/v1/assistants${params}`);
+}
+
+export async function listReviewAssistants() {
+  return request<{ assistants: AssistantSummary[]; total: number; domains: Record<string, string> }>(
+    "/api/v1/assistants/review"
+  );
+}
+
+export async function listDiscoveryAssistants() {
+  return request<{ assistants: AssistantSummary[]; total: number; domains: Record<string, string> }>(
+    "/api/v1/assistants/discovery"
+  );
 }
 
 // ── Review ───────────────────────────────────────────────────────────────────

@@ -8,11 +8,11 @@ class Settings(BaseSettings):
 
     # App
     app_name: str = "Genesis SaaS"
-    debug: bool = False
+    debug: bool = True
     cors_origins: list[str] = ["http://localhost:3000"]
 
-    # Database
-    database_url: str = "postgresql+asyncpg://genesis:genesis@localhost:5432/genesis"
+    # Database (defaults to SQLite for local dev; use PostgreSQL in production)
+    database_url: str = "sqlite+aiosqlite:///genesis.db"
     database_echo: bool = False
 
     # Redis

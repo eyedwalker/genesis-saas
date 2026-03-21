@@ -16,9 +16,11 @@ import { FactoryList } from "./FactoryList";
 import { CreateFactoryModal } from "./CreateFactoryModal";
 import { BuildView } from "./BuildView";
 import { ConversationView } from "./ConversationView";
+import { AssistantPicker } from "./AssistantPicker";
 
 type View =
   | { type: "factories" }
+  | { type: "pickAssistants"; factoryId: string; idea: string }
   | { type: "conversation"; buildId: string; state: ConversationState }
   | { type: "build"; buildId: string };
 
@@ -49,11 +51,22 @@ export function Dashboard() {
     refresh();
   }, []);
 
-  const handleStartBuild = async (factoryId: string, idea: string) => {
+  // Step 1: User types idea → show assistant picker
+  const handleStartBuild = (factoryId: string, idea: string) => {
+    setView({ type: "pickAssistants", factoryId, idea });
+  };
+
+  // Step 2: User picks assistants → start conversation
+  const handleAssistantsChosen = async (
+    factoryId: string,
+    idea: string,
+    assistantIds: string[]
+  ) => {
     try {
       const state = await startConversation({
         factory_id: factoryId,
         initial_idea: idea,
+        assistant_ids: assistantIds,
       });
       setView({ type: "conversation", buildId: state.build_id, state });
     } catch (err: any) {
@@ -118,7 +131,11 @@ export function Dashboard() {
       </header>
 
       {/* Main content */}
-      <main className={view.type === "conversation" ? "" : "max-w-7xl mx-auto px-6 py-8"}>
+      <main
+        className={
+          view.type === "conversation" ? "" : "max-w-7xl mx-auto px-6 py-8"
+        }
+      >
         {view.type === "factories" && (
           <>
             <div className="flex items-center justify-between mb-6">
@@ -167,6 +184,18 @@ export function Dashboard() {
           </div>
         )}
       </main>
+
+      {/* Assistant Picker modal */}
+      {view.type === "pickAssistants" && (
+        <AssistantPicker
+          factoryId={view.factoryId}
+          initialIdea={view.idea}
+          onStart={(assistantIds) =>
+            handleAssistantsChosen(view.factoryId, view.idea, assistantIds)
+          }
+          onCancel={() => setView({ type: "factories" })}
+        />
+      )}
 
       {showCreate && (
         <CreateFactoryModal

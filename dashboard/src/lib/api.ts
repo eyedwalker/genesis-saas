@@ -2,7 +2,9 @@
  * Genesis API client — all backend calls go through here.
  */
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+// In production, use relative URLs (nginx proxies /api/ to backend).
+// In dev, point to localhost:8000.
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || (typeof window !== "undefined" && window.location.hostname !== "localhost" ? "" : "http://localhost:8000");
 
 let authToken: string | null = null;
 

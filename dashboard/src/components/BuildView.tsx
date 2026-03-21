@@ -133,7 +133,7 @@ export function BuildView({
       const updated = await advanceBuild(buildId);
       setBuild(updated);
     } catch (err: any) {
-      alert(err.message);
+      console.error(err.message);
     } finally {
       setAdvancing(false);
     }
@@ -151,7 +151,7 @@ export function BuildView({
       setBuild(updated);
       setApproveComment("");
     } catch (err: any) {
-      alert(err.message);
+      console.error(err.message);
     } finally {
       setAdvancing(false);
     }

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel
-from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,25 +14,25 @@ from genesis.db.session import get_session
 router = APIRouter()
 
 
-# ── Schemas ────────────────────────────────────────────────────────────────────
+# ── Schemas with validation ───────────────────────────────────────────────────
 
 
 class FactoryCreate(BaseModel):
-    name: str
-    domain: str
-    description: str | None = None
-    tech_stack: str | None = None
+    name: str = Field(..., min_length=1, max_length=200)
+    domain: str = Field(..., min_length=1, max_length=100)
+    description: str | None = Field(default=None, max_length=2000)
+    tech_stack: str | None = Field(default=None, max_length=100)
     fast_track: bool = False
 
 
 class FactoryUpdate(BaseModel):
-    name: str | None = None
-    domain: str | None = None
-    description: str | None = None
-    tech_stack: str | None = None
-    status: str | None = None
+    name: str | None = Field(default=None, max_length=200)
+    domain: str | None = Field(default=None, max_length=100)
+    description: str | None = Field(default=None, max_length=2000)
+    tech_stack: str | None = Field(default=None, max_length=100)
+    status: str | None = Field(default=None, max_length=20)
     fast_track: bool | None = None
-    github_repo: str | None = None
+    github_repo: str | None = Field(default=None, max_length=500)
 
 
 class FactoryResponse(BaseModel):
@@ -61,49 +61,55 @@ class FactoryListResponse(BaseModel):
 
 @router.get("", response_model=FactoryListResponse)
 async def list_factories(
+    limit: int = Query(default=50, le=200),
+    offset: int = Query(default=0, ge=0),
     current: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ):
-    """List all factories for the current tenant."""
-    result = await db.execute(
-        select(Factory)
+    """List all factories for the current tenant with build stats. Paginated."""
+    # Single query with LEFT JOIN aggregation — no N+1
+    from sqlalchemy import literal_column
+    from sqlalchemy.orm import aliased
+
+    # Get factories with build counts in one query
+    stmt = (
+        select(
+            Factory,
+            func.count(Build.id).label("build_count"),
+            func.avg(Build.vibe_score).label("avg_vibe"),
+        )
+        .outerjoin(Build, Build.factory_id == Factory.id)
         .where(Factory.tenant_id == current.tenant_id)
+        .group_by(Factory.id)
         .order_by(Factory.created_at.desc())
+        .limit(limit)
+        .offset(offset)
     )
-    factories = result.scalars().all()
+    result = await db.execute(stmt)
+    rows = result.all()
 
-    responses = []
-    for f in factories:
-        # Get build stats
-        build_count_result = await db.execute(
-            select(func.count()).select_from(Build).where(Build.factory_id == f.id)
+    # Total count
+    total_result = await db.execute(
+        select(func.count()).select_from(Factory).where(
+            Factory.tenant_id == current.tenant_id
         )
-        build_count = build_count_result.scalar() or 0
+    )
+    total = total_result.scalar() or 0
 
-        avg_vibe_result = await db.execute(
-            select(func.avg(Build.vibe_score))
-            .where(Build.factory_id == f.id)
-            .where(Build.vibe_score.isnot(None))
+    responses = [
+        FactoryResponse(
+            id=f.id, name=f.name, domain=f.domain,
+            description=f.description, tech_stack=f.tech_stack,
+            status=f.status, fast_track=f.fast_track,
+            github_repo=f.github_repo,
+            build_count=build_count or 0,
+            avg_vibe_score=round(avg_vibe, 1) if avg_vibe else None,
+            created_at=f.created_at.isoformat(),
         )
-        avg_vibe = avg_vibe_result.scalar()
+        for f, build_count, avg_vibe in rows
+    ]
 
-        responses.append(
-            FactoryResponse(
-                id=f.id,
-                name=f.name,
-                domain=f.domain,
-                description=f.description,
-                tech_stack=f.tech_stack,
-                status=f.status,
-                fast_track=f.fast_track,
-                github_repo=f.github_repo,
-                build_count=build_count,
-                avg_vibe_score=round(avg_vibe, 1) if avg_vibe else None,
-                created_at=f.created_at.isoformat(),
-            )
-        )
-
-    return FactoryListResponse(factories=responses, total=len(responses))
+    return FactoryListResponse(factories=responses, total=total)
 
 
 @router.post("", response_model=FactoryResponse, status_code=201)

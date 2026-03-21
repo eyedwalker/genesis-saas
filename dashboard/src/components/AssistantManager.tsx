@@ -210,7 +210,7 @@ export function AssistantManager({ onBack }: { onBack: () => void }) {
       setShowEditor(true);
       refresh();
     } catch (err: any) {
-      alert(err.message);
+      console.error(err.message);
     }
   };
 
@@ -221,7 +221,7 @@ export function AssistantManager({ onBack }: { onBack: () => void }) {
       refresh();
       if (selectedDetail?.id === id) setSelectedDetail(null);
     } catch (err: any) {
-      alert(err.message);
+      console.error(err.message);
     }
   };
 

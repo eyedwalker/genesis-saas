@@ -1,12 +1,12 @@
-"""Tenant-aware JWT authentication."""
+"""Tenant-aware JWT authentication with bcrypt password hashing."""
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 from typing import Any
 
-import hashlib
-
+import bcrypt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
@@ -17,22 +17,29 @@ from genesis.config import settings
 from genesis.db.models import Tenant, TenantUser
 from genesis.db.session import get_session
 
+logger = logging.getLogger(__name__)
 security = HTTPBearer()
 
 
 def hash_password(password: str) -> str:
-    """Hash password using SHA-256 with salt. Production should use bcrypt."""
-    import secrets
-    salt = secrets.token_hex(16)
-    hashed = hashlib.sha256(f"{salt}:{password}".encode()).hexdigest()
-    return f"{salt}${hashed}"
+    """Hash password using bcrypt (cost factor 12)."""
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt(rounds=12)).decode()
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    if "$" not in hashed:
+    """Verify password against bcrypt hash. Also handles legacy SHA-256."""
+    # Handle legacy SHA-256 hashes (salt$hash format)
+    if "$" in hashed and len(hashed.split("$")) == 2 and len(hashed) < 100:
+        import hashlib
+        salt, hash_val = hashed.split("$", 1)
+        if hashlib.sha256(f"{salt}:{plain}".encode()).hexdigest() == hash_val:
+            return True
         return False
-    salt, hash_val = hashed.split("$", 1)
-    return hashlib.sha256(f"{salt}:{plain}".encode()).hexdigest() == hash_val
+    # bcrypt verification
+    try:
+        return bcrypt.checkpw(plain.encode(), hashed.encode())
+    except (ValueError, TypeError):
+        return False
 
 
 def create_access_token(
@@ -108,5 +115,4 @@ async def get_current_user(
 async def get_current_tenant(
     current_user: CurrentUser = Depends(get_current_user),
 ) -> Tenant:
-    """Convenience dependency: returns just the tenant."""
     return current_user.tenant

@@ -72,7 +72,7 @@ export function Dashboard() {
       });
       setView({ type: "conversation", buildId: state.build_id, state });
     } catch (err: any) {
-      alert(err.message);
+      console.error(err.message);
     }
   };
 

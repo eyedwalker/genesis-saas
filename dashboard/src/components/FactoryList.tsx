@@ -73,7 +73,7 @@ function FactoryCard({
       onStartBuild(factory.id, newFeature);
       setNewFeature("");
     } catch (err: any) {
-      alert(err.message);
+      console.error(err.message);
     } finally {
       setLoading(false);
     }

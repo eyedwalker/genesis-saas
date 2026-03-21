@@ -19,6 +19,13 @@ RUN pip install --no-cache-dir -e ".[dev]"
 # Copy source
 COPY . .
 
+# Non-root user
+RUN adduser --disabled-password --gecos "" appuser
+USER appuser
+
 EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+    CMD curl -sf http://localhost:8000/health || exit 1
 
 CMD ["uvicorn", "genesis.main:app", "--host", "0.0.0.0", "--port", "8000"]

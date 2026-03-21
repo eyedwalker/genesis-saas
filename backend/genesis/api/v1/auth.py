@@ -1,9 +1,11 @@
-"""Auth endpoints — register tenant, login, token."""
+"""Auth endpoints — register, login, me. With rate limiting and validation."""
 
 from __future__ import annotations
 
-from pydantic import BaseModel, EmailStr
-from fastapi import APIRouter, Depends, HTTPException
+import re
+
+from pydantic import BaseModel, Field, field_validator
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,27 +16,42 @@ from genesis.auth.middleware import (
     hash_password,
     verify_password,
 )
+from genesis.auth.rate_limit import check_rate_limit
 from genesis.db.models import Tenant, TenantUser
 from genesis.db.session import get_session
 
 router = APIRouter()
 
 
-# ── Schemas ────────────────────────────────────────────────────────────────────
+# ── Schemas with validation ───────────────────────────────────────────────────
 
 
 class RegisterRequest(BaseModel):
-    tenant_name: str
-    tenant_slug: str
-    email: str
-    password: str
-    name: str = ""
+    tenant_name: str = Field(..., min_length=2, max_length=100)
+    tenant_slug: str = Field(..., min_length=2, max_length=50)
+    email: str = Field(..., max_length=255)
+    password: str = Field(..., min_length=8, max_length=128)
+    name: str = Field(default="", max_length=100)
+
+    @field_validator("tenant_slug")
+    @classmethod
+    def validate_slug(cls, v: str) -> str:
+        if not re.match(r"^[a-z0-9][a-z0-9-]*[a-z0-9]$", v):
+            raise ValueError("Slug must be lowercase alphanumeric with hyphens")
+        return v
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, v: str) -> str:
+        if "@" not in v or "." not in v.split("@")[-1]:
+            raise ValueError("Invalid email format")
+        return v.lower().strip()
 
 
 class LoginRequest(BaseModel):
-    email: str
-    password: str
-    tenant_slug: str
+    email: str = Field(..., max_length=255)
+    password: str = Field(..., max_length=128)
+    tenant_slug: str = Field(..., max_length=50)
 
 
 class TokenResponse(BaseModel):
@@ -58,9 +75,14 @@ class MeResponse(BaseModel):
 
 
 @router.post("/register", response_model=TokenResponse)
-async def register(body: RegisterRequest, db: AsyncSession = Depends(get_session)):
+async def register(
+    body: RegisterRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_session),
+):
     """Register a new tenant + admin user."""
-    # Check slug uniqueness
+    check_rate_limit(request)
+
     existing = await db.execute(
         select(Tenant).where(Tenant.slug == body.tenant_slug)
     )
@@ -91,8 +113,14 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_session
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(body: LoginRequest, db: AsyncSession = Depends(get_session)):
+async def login(
+    body: LoginRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_session),
+):
     """Login with email + password + tenant slug."""
+    check_rate_limit(request)
+
     tenant = (
         await db.execute(select(Tenant).where(Tenant.slug == body.tenant_slug))
     ).scalar_one_or_none()

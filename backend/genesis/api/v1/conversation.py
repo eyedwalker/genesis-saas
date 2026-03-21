@@ -370,8 +370,12 @@ async def scan_website(
     """Scan a website URL and add it as context for the build.
 
     Claude will analyze the site's design, structure, and content
-    to inform the build.
+    to inform the build. SSRF-protected: blocks private/internal IPs.
     """
+    # SSRF protection
+    from genesis.auth.ssrf import validate_url
+    validate_url(body.url)
+
     build = await db.get(Build, build_id)
     if not build:
         raise HTTPException(404, "Build not found")

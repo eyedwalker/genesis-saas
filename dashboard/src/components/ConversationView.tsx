@@ -110,7 +110,7 @@ export function ConversationView({
       const updated = await sendMessage(buildId, msg);
       setState(updated);
     } catch (err: any) {
-      alert(err.message);
+      console.error(err.message);
     } finally {
       setSending(false);
     }
@@ -129,7 +129,7 @@ export function ConversationView({
       const updated = await getConversation(buildId);
       setState(updated);
     } catch (err: any) {
-      alert(`Scan failed: ${err.message}`);
+      console.error(`Scan failed: ${err.message}`);
     } finally {
       setScanning(false);
     }
@@ -153,7 +153,7 @@ export function ConversationView({
         ]);
         setState(updated);
       } catch (err: any) {
-        alert(err.message);
+        console.error(err.message);
       } finally {
         setSending(false);
       }
@@ -167,7 +167,7 @@ export function ConversationView({
       await generateRequirements(buildId);
       onRequirementsGenerated(buildId);
     } catch (err: any) {
-      alert(err.message);
+      console.error(err.message);
     } finally {
       setGenerating(false);
     }

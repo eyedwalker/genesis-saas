@@ -90,6 +90,7 @@ class AssistantDomain(str, Enum):
     COMPLIANCE = "compliance"
     INFRASTRUCTURE = "infrastructure"
     FRONTEND = "frontend"
+    DESIGN = "design"
     BUSINESS = "business"
     PROJECT = "project"
     BA = "ba"

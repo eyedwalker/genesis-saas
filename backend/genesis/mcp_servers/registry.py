@@ -28,8 +28,10 @@ def get_mcp_servers_for_assistants(
     domain_servers = {
         "compliance": "genesis-security",
         "quality": "genesis-code-quality",
-        "architecture": "genesis-database",  # DB is part of architecture
+        "architecture": "genesis-database",
         "infrastructure": "genesis-infrastructure",
+        "frontend": "genesis-design",
+        "design": "genesis-design",
         "project": "genesis-discovery",
         "ba": "genesis-discovery",
     }
@@ -51,6 +53,7 @@ def get_mcp_servers_for_assistants(
         "genesis-database": lambda: _load_database_server(),
         "genesis-infrastructure": lambda: _load_infrastructure_server(),
         "genesis-discovery": lambda: _load_discovery_server(),
+        "genesis-design": lambda: _load_design_server(),
     }
 
     needed_servers = set()
@@ -96,6 +99,11 @@ def _load_discovery_server():
     return discovery_server
 
 
+def _load_design_server():
+    from genesis.mcp_servers.design import design_server
+    return design_server
+
+
 def get_mcp_tool_names(servers: dict[str, Any]) -> list[str]:
     """Get the tool permission strings for MCP server tools.
 
@@ -122,6 +130,10 @@ def get_mcp_tool_names(servers: dict[str, Any]) -> list[str]:
         "genesis-discovery": [
             "analyze_competitor", "generate_persona",
             "build_journey_map", "validate_hypothesis", "shape_scope",
+        ],
+        "genesis-design": [
+            "generate_color_palette", "generate_design_tokens",
+            "recommend_components", "audit_visual_consistency",
         ],
     }
 

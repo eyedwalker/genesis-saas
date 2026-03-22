@@ -354,39 +354,80 @@ export function AssistantManager({ onBack }: { onBack: () => void }) {
         </div>
 
         {/* Right: Detail panel */}
-        <div className="w-96 flex-shrink-0">
+        <div className="w-[480px] flex-shrink-0">
           {selectedDetail ? (
-            <div className="bg-white border rounded-xl p-5 sticky top-4">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="font-semibold text-gray-900">{selectedDetail.name}</h3>
-                <span className={`text-xs px-2 py-0.5 rounded ${
-                  selectedDetail.source === "custom"
-                    ? "bg-purple-100 text-purple-700"
-                    : "bg-gray-100 text-gray-500"
-                }`}>
-                  {selectedDetail.source}
-                </span>
-              </div>
-              <p className="text-sm text-gray-600 mb-3">{selectedDetail.description}</p>
-              <div className="flex gap-4 text-xs text-gray-500 mb-4">
-                <span>Domain: {selectedDetail.domain_label}</span>
-                <span>Weight: {selectedDetail.weight}x</span>
-                <span>{selectedDetail.is_active ? "Active" : "Disabled"}</span>
-              </div>
-              <div className="border-t pt-3">
-                <h4 className="text-xs font-semibold text-gray-600 mb-2">
-                  System Prompt ({selectedDetail.system_prompt.length} chars)
-                </h4>
-                <pre className="text-xs text-gray-700 whitespace-pre-wrap bg-gray-50 rounded-lg p-3 max-h-96 overflow-y-auto font-mono">
-                  {selectedDetail.system_prompt}
-                </pre>
-              </div>
-              <div className="mt-4 flex gap-2">
-                {selectedDetail.source === "catalog" ? (
-                  <button onClick={() => handleFork(selectedDetail.id)}
-                    className="flex-1 py-2 text-sm border rounded-lg text-genesis-600 hover:bg-genesis-50 transition">
-                    Fork & Customize
+            <div className="bg-white border rounded-xl sticky top-4 overflow-hidden">
+              {/* Header */}
+              <div className="px-5 py-4 border-b">
+                <div className="flex items-center justify-between mb-1">
+                  <h3 className="font-semibold text-gray-900 text-lg">{selectedDetail.name}</h3>
+                  <button
+                    onClick={() => setSelectedDetail(null)}
+                    className="text-gray-400 hover:text-gray-600 text-sm"
+                  >
+                    ✕
                   </button>
+                </div>
+                <p className="text-sm text-gray-600">{selectedDetail.description}</p>
+                <div className="flex gap-3 mt-3">
+                  <span className={`text-xs px-2 py-1 rounded ${
+                    selectedDetail.source === "custom"
+                      ? "bg-purple-100 text-purple-700"
+                      : "bg-gray-100 text-gray-600"
+                  }`}>
+                    {selectedDetail.source === "catalog" ? "Built-in" : "Custom"}
+                  </span>
+                  <span className="text-xs px-2 py-1 rounded bg-blue-50 text-blue-700">
+                    {selectedDetail.domain_label}
+                  </span>
+                  <span className="text-xs px-2 py-1 rounded bg-amber-50 text-amber-700">
+                    Weight: {selectedDetail.weight}x
+                  </span>
+                  <span className={`text-xs px-2 py-1 rounded ${
+                    selectedDetail.is_active
+                      ? "bg-green-50 text-green-700"
+                      : "bg-gray-100 text-gray-500"
+                  }`}>
+                    {selectedDetail.is_active ? "Active" : "Disabled"}
+                  </span>
+                </div>
+              </div>
+
+              {/* System Prompt */}
+              <div className="px-5 py-3 border-b bg-gray-50">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-xs font-semibold text-gray-600">
+                    System Prompt ({selectedDetail.system_prompt.length.toLocaleString()} chars)
+                  </h4>
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(selectedDetail.system_prompt);
+                    }}
+                    className="text-xs text-genesis-600 hover:text-genesis-700 px-2 py-1 rounded hover:bg-genesis-50"
+                  >
+                    Copy
+                  </button>
+                </div>
+              </div>
+              <pre className="text-xs text-gray-700 whitespace-pre-wrap px-5 py-4 max-h-[60vh] overflow-y-auto font-mono leading-relaxed">
+                {selectedDetail.system_prompt}
+              </pre>
+
+              {/* Actions */}
+              <div className="px-5 py-3 border-t bg-gray-50 flex gap-2">
+                {selectedDetail.source === "catalog" ? (
+                  <>
+                    <button
+                      onClick={() => navigator.clipboard.writeText(selectedDetail.system_prompt)}
+                      className="flex-1 py-2 text-sm border rounded-lg text-gray-600 hover:bg-white transition"
+                    >
+                      Copy Prompt
+                    </button>
+                    <button onClick={() => handleFork(selectedDetail.id)}
+                      className="flex-1 py-2 text-sm border border-genesis-200 rounded-lg text-genesis-600 hover:bg-genesis-50 transition">
+                      Fork & Customize
+                    </button>
+                  </>
                 ) : (
                   <>
                     <button onClick={() => handleEdit(selectedDetail.id)}
@@ -402,9 +443,9 @@ export function AssistantManager({ onBack }: { onBack: () => void }) {
               </div>
             </div>
           ) : (
-            <div className="bg-white border rounded-xl p-8 text-center text-gray-400">
+            <div className="bg-white border rounded-xl p-8 text-center text-gray-400 sticky top-4">
               <p className="text-lg mb-1">Select an assistant</p>
-              <p className="text-sm">Click any assistant to view its system prompt and details</p>
+              <p className="text-sm">Click any assistant to view its full system prompt</p>
             </div>
           )}
         </div>

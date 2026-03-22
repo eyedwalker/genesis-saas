@@ -270,20 +270,12 @@ async def start_conversation(
         )
         assistant_reply = result.result or "I'd love to help you build this! Let me ask a few questions to make sure we build exactly what you need. Who are the primary users of this application?"
     except Exception as e:
-        logger.warning("Claude not available: %s", e)
-        if not api_key:
-            assistant_reply = (
-                "⚠️ **Claude is not connected.** Go to Settings and add your Anthropic API key "
-                "to enable AI-powered discovery.\n\n"
-                "In the meantime, tell me about your project and I'll track what you share "
-                "in the Discovery Board on the right."
-            )
-        else:
-            assistant_reply = (
-                f"I'd love to help you build this {factory.domain} application. "
-                f"Let me ask a few questions to make sure we design it right.\n\n"
-                f"First — who are the primary users of this application, and what's their main goal?"
-            )
+        logger.error("Claude failed: %s", e)
+        assistant_reply = (
+            "⚠️ **Claude connection issue.** Check Settings to ensure your API key is set, "
+            "or run `claude login` on the server for Max/Pro.\n\n"
+            f"Error: {str(e)[:150]}"
+        )
 
     initial_messages.append({
         "role": "assistant",
@@ -378,11 +370,8 @@ async def send_message(
         )
         assistant_reply = result.result or "Could you tell me more about that?"
     except Exception as e:
-        logger.warning("Claude not available: %s", e)
-        if not api_key:
-            assistant_reply = "⚠️ **Claude is not connected.** Add your API key in Settings to enable AI responses."
-        else:
-            assistant_reply = "Thanks for sharing that! Could you tell me more about the user workflow you're envisioning?"
+        logger.error("Claude failed on message: %s", e)
+        assistant_reply = f"⚠️ Claude connection issue: {str(e)[:150]}"
 
     messages.append({
         "role": "assistant",

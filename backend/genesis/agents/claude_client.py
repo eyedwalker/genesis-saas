@@ -64,11 +64,7 @@ async def run_agent(
     if api_key:
         env["ANTHROPIC_API_KEY"] = api_key
 
-    if not env.get("ANTHROPIC_API_KEY"):
-        raise RuntimeError(
-            "No Anthropic API key configured. "
-            "Set your API key in Settings or set GENESIS_ANTHROPIC_API_KEY on the server."
-        )
+    # If no API key, that's OK — SDK will use Claude Max/Pro auth from CLI login
 
     options = ClaudeAgentOptions(
         system_prompt=system_prompt,

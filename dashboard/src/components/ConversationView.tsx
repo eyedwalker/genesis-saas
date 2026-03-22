@@ -124,9 +124,7 @@ export function ConversationView({
     setScanning(true);
 
     try {
-      const result = await scanWebsite(buildId, url);
-      // Refresh conversation to get the scan context
-      const updated = await getConversation(buildId);
+      const updated = await scanWebsite(buildId, url);
       setState(updated);
     } catch (err: any) {
       console.error(`Scan failed: ${err.message}`);

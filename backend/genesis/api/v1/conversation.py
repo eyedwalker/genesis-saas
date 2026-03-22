@@ -89,6 +89,67 @@ def _get_context(build: Build) -> dict:
     return (build.interview_log or {}).get("context", {})
 
 
+def _build_context_block(ctx: dict) -> str:
+    """Build a rich context block with all reference materials for Claude."""
+    parts = []
+
+    uploads = ctx.get("uploads", [])
+    if uploads:
+        parts.append("=== UPLOADED FILES ===")
+        for u in uploads:
+            parts.append(f"\n📎 File: {u.get('name', 'unknown')}")
+            if u.get("summary"):
+                parts.append(f"   Summary: {u['summary']}")
+            if u.get("columns"):
+                parts.append(f"   Columns: {', '.join(u['columns'])}")
+            if u.get("row_count"):
+                parts.append(f"   Rows: {u['row_count']}")
+            if u.get("preview"):
+                parts.append(f"   Preview: {u['preview'][:500]}")
+            if u.get("headings"):
+                parts.append(f"   Sections: {', '.join(u['headings'][:5])}")
+
+    scans = ctx.get("scans", [])
+    if scans:
+        parts.append("\n=== SCANNED WEBSITES ===")
+        for s in scans:
+            parts.append(f"\n🌐 Site: {s.get('url', '')}")
+            if s.get("title"):
+                parts.append(f"   Title: {s['title']}")
+            if s.get("description"):
+                parts.append(f"   Description: {s['description']}")
+            if s.get("tech_stack"):
+                parts.append(f"   Tech Stack: {', '.join(s['tech_stack'])}")
+            if s.get("headings"):
+                parts.append(f"   Key Messages: {'; '.join(s['headings'][:5])}")
+            if s.get("navigation"):
+                nav_labels = [n.get("label", "") for n in s["navigation"][:10] if n.get("label")]
+                if nav_labels:
+                    parts.append(f"   Navigation: {', '.join(nav_labels)}")
+            features = []
+            if s.get("has_login"):
+                features.append("has login/auth")
+            if s.get("has_pricing"):
+                features.append("has pricing page")
+            if s.get("has_forms"):
+                features.append("has forms")
+            if s.get("has_api_docs"):
+                features.append("has API docs")
+            if features:
+                parts.append(f"   Features: {', '.join(features)}")
+            if s.get("colors"):
+                parts.append(f"   Colors: {', '.join(s['colors'][:6])}")
+
+    assistants = ctx.get("selected_assistants", [])
+    if assistants:
+        parts.append(f"\n=== ACTIVE ASSISTANTS ===\n{', '.join(assistants[:10])}")
+
+    if not parts:
+        return "(No reference materials shared yet)"
+
+    return "\n".join(parts)
+
+
 async def _get_tenant_api_key(tenant_id: str, db: AsyncSession) -> str | None:
     """Get the tenant's Anthropic API key."""
     from genesis.db.models import Tenant
@@ -340,29 +401,54 @@ async def send_message(
 
     messages.append(user_msg)
 
-    # Build conversation for Claude
+    # Build conversation for Claude — include EVERYTHING Claude needs
     system_prompt = _build_system_prompt(factory, build)
-    claude_messages = []
+    ctx = _get_context(build)
+
+    # Build rich context block with all reference materials
+    context_block = _build_context_block(ctx)
+
+    # Build proper multi-turn conversation
+    # Include system messages (scans, uploads) as user context
+    conversation_parts = []
     for m in messages:
-        role = m["role"]
-        if role in ("user", "assistant"):
-            claude_messages.append({"role": role, "content": m["content"]})
+        role = m.get("role", "user")
+        content = m.get("content", "")
+        if role == "system":
+            # System messages (scans, uploads) → inject as user context
+            conversation_parts.append(f"[System Update: {content}]")
+        elif role == "user":
+            conversation_parts.append(f"User: {content}")
+        elif role == "assistant":
+            conversation_parts.append(f"You (Claude): {content}")
+
+    convo_text = "\n\n".join(conversation_parts)
 
     # Get tenant's API key
     api_key = await _get_tenant_api_key(current.tenant_id, db)
+
+    # Build the full prompt with context + conversation
+    full_prompt = f"""Here is the complete discovery conversation so far, including all reference materials the user has shared:
+
+{context_block}
+
+--- CONVERSATION ---
+{convo_text}
+--- END CONVERSATION ---
+
+Continue the discovery conversation. You MUST:
+1. Remember and reference EVERYTHING discussed above
+2. Reference any uploaded files or scanned websites by name
+3. Build on what you've already learned — don't repeat questions
+4. Ask your next question or, if you have enough context, say you're ready to generate requirements
+5. Be specific — reference details from previous messages"""
 
     # Get Claude's response
     try:
         from genesis.agents.claude_client import run_agent
 
-        # Build the full conversation context
-        convo_text = "\n\n".join(
-            f"{'User' if m['role'] == 'user' else 'You'}: {m['content']}"
-            for m in claude_messages
-        )
-
         result = await run_agent(
-            prompt=f"Continue this discovery conversation:\n\n{convo_text}\n\nRespond to the user's latest message. Ask follow-up questions if needed, or if you have enough context, say you're ready to generate requirements.",
+            prompt=full_prompt,
             system_prompt=system_prompt,
             model="sonnet",
             max_turns=1,
@@ -463,11 +549,7 @@ async def scan_website(
     _save_conversation(build, messages, {"scans": scans})
     await db.flush()
 
-    return {
-        "url": body.url,
-        "summary": scan_summary,
-        "build_id": build.id,
-    }
+    return _build_conversation_state(build)
 
 
 @router.post("/{build_id}/upload")
@@ -533,12 +615,7 @@ async def upload_attachment(
     _save_conversation(build, messages, {"uploads": uploads})
     await db.flush()
 
-    return {
-        "filename": file.filename,
-        "type": file_type,
-        "size": len(content),
-        "build_id": build.id,
-    }
+    return _build_conversation_state(build)
 
 
 @router.post("/{build_id}/generate-requirements")

@@ -288,7 +288,7 @@ export async function sendMessage(buildId: string, message: string, attachments?
 }
 
 export async function scanWebsite(buildId: string, url: string) {
-  return request<{ url: string; summary: string }>(`/api/v1/conversation/${buildId}/scan-website`, {
+  return request<ConversationState>(`/api/v1/conversation/${buildId}/scan-website`, {
     method: "POST",
     body: JSON.stringify({ url }),
   });

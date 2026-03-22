@@ -63,6 +63,7 @@ class ConversationState(BaseModel):
     phase: str  # discovery, requirements, design, planning, building, reviewing
     messages: list[ConversationMessage]
     context: dict[str, Any]  # uploaded docs, scanned sites, etc.
+    artifacts: dict[str, Any] | None = None  # synthesized personas, features, etc.
     ready_to_build: bool
 
 
@@ -86,6 +87,38 @@ def _save_conversation(build: Build, messages: list[dict], context: dict | None 
 def _get_context(build: Build) -> dict:
     """Get accumulated context (uploads, scans, etc.)."""
     return (build.interview_log or {}).get("context", {})
+
+
+def _build_conversation_state(build: Build, ready: bool = False) -> ConversationState:
+    """Build a ConversationState with synthesized artifacts."""
+    messages = _get_conversation_log(build)
+    ctx = _get_context(build)
+
+    # Run synthesis on every response
+    from genesis.pipeline.discovery_engine import synthesize_discovery
+    artifacts = synthesize_discovery(messages, ctx)
+
+    phase = "discovery"
+    if build.status == "requirements_review":
+        phase = "requirements"
+    elif build.status in ("design", "design_review"):
+        phase = "design"
+    elif build.status in ("planning", "plan_review"):
+        phase = "planning"
+    elif build.status == "building":
+        phase = "building"
+    elif build.status in ("reviewing", "code_review", "qa_review"):
+        phase = "reviewing"
+
+    return ConversationState(
+        build_id=build.id,
+        factory_id=build.factory_id,
+        phase=phase,
+        messages=[ConversationMessage(**m) for m in messages],
+        context=ctx,
+        artifacts=artifacts,
+        ready_to_build=ready or build.status != "interviewing",
+    )
 
 
 def _get_discovery_assistants() -> str:
@@ -251,14 +284,7 @@ async def start_conversation(
     ))
     await db.flush()
 
-    return ConversationState(
-        build_id=build.id,
-        factory_id=build.factory_id,
-        phase="discovery",
-        messages=[ConversationMessage(**m) for m in initial_messages],
-        context=_get_context(build),
-        ready_to_build=False,
-    )
+    return _build_conversation_state(build)
 
 
 @router.post("/{build_id}/message", response_model=ConversationState)
@@ -350,14 +376,7 @@ async def send_message(
         ]
     )
 
-    return ConversationState(
-        build_id=build.id,
-        factory_id=build.factory_id,
-        phase="discovery",
-        messages=[ConversationMessage(**m) for m in messages],
-        context=_get_context(build),
-        ready_to_build=ready,
-    )
+    return _build_conversation_state(build, ready=ready)
 
 
 @router.post("/{build_id}/scan-website")
@@ -383,36 +402,46 @@ async def scan_website(
     if not factory or factory.tenant_id != current.tenant_id:
         raise HTTPException(404, "Build not found")
 
-    # Fetch and analyze the website
-    try:
-        from genesis.agents.claude_client import run_agent
+    # Fetch and analyze the website (real HTTP fetch, no Claude needed)
+    from genesis.pipeline.discovery_engine import scan_website
 
-        result = await run_agent(
-            prompt=f"Analyze this website for a user who wants to build something similar: {body.url}\n\nDescribe:\n1. The overall purpose and target audience\n2. Key features and functionality\n3. UI/UX patterns (navigation, layout, color scheme)\n4. Tech stack clues (if visible)\n5. What works well and what could be improved",
-            system_prompt="You are a web analyst. Analyze the given website and provide a structured summary.",
-            model="sonnet",
-            tools=["WebFetch"],
-            max_turns=5,
-        )
-        scan_summary = result.result or f"Scanned {body.url}"
-    except Exception as e:
-        logger.warning("Website scan failed: %s", e)
-        scan_summary = f"Reference website: {body.url} (scan unavailable — Claude will reference this URL during build)"
+    scan_result = await scan_website(body.url)
 
-    # Add to context
+    # Build rich summary for the conversation
+    scan_summary_parts = []
+    if scan_result.get("title"):
+        scan_summary_parts.append(f"**{scan_result['title']}**")
+    if scan_result.get("description"):
+        scan_summary_parts.append(scan_result["description"])
+    if scan_result.get("tech_stack"):
+        scan_summary_parts.append(f"Tech stack: {', '.join(scan_result['tech_stack'])}")
+    if scan_result.get("headings"):
+        scan_summary_parts.append(f"Key messages: {'; '.join(scan_result['headings'][:3])}")
+    if scan_result.get("navigation"):
+        nav_labels = [n["label"] for n in scan_result["navigation"][:8]]
+        scan_summary_parts.append(f"Navigation: {', '.join(nav_labels)}")
+    if scan_result.get("has_login"):
+        scan_summary_parts.append("Has authentication/login")
+    if scan_result.get("has_pricing"):
+        scan_summary_parts.append("Has pricing page")
+    if scan_result.get("colors"):
+        scan_summary_parts.append(f"Colors: {', '.join(scan_result['colors'][:5])}")
+
+    scan_summary = " | ".join(scan_summary_parts) if scan_summary_parts else scan_result.get("summary", f"Scanned {body.url}")
+
+    # Add full scan data to context
     ctx = _get_context(build)
     scans = ctx.get("scans", [])
     scans.append({
-        "url": body.url,
+        **scan_result,
         "scan_type": body.scan_type,
-        "summary": scan_summary,
         "scanned_at": datetime.utcnow().isoformat(),
     })
 
     messages = _get_conversation_log(build)
     messages.append({
         "role": "system",
-        "content": f"Website scanned: {body.url}\n\n{scan_summary}",
+        "content": f"🌐 Website scanned: {body.url}\n\n{scan_summary}",
         "timestamp": datetime.utcnow().isoformat(),
     })
 
@@ -453,42 +482,36 @@ async def upload_attachment(
 
     file_type = file.content_type or "application/octet-stream"
     is_image = file_type.startswith("image/")
-    is_text = file_type in (
-        "text/plain", "text/markdown", "text/csv",
-        "application/json", "application/xml",
-    )
 
-    # Build summary
-    if is_text:
-        text_content = content.decode("utf-8", errors="replace")[:5000]
-        summary = f"Document content:\n{text_content}"
-    elif is_image:
-        # Store as base64 for Claude to analyze later
-        b64 = base64.b64encode(content).decode()
-        summary = f"Image uploaded: {file.filename} ({file_type})"
-        # TODO: Use Claude vision to analyze the image
-    else:
-        summary = f"File uploaded: {file.filename} ({file_type}, {len(content)} bytes)"
+    # Analyze the file content
+    from genesis.pipeline.discovery_engine import analyze_file
+
+    text_content = content.decode("utf-8", errors="replace") if not is_image else ""
+    analysis = analyze_file(text_content, file.filename or "unnamed", file_type)
+
+    if is_image:
+        analysis["summary"] = f"Image: {file.filename} ({file_type}, {len(content):,} bytes)"
+        analysis["format"] = "image"
 
     if description:
-        summary = f"{description}\n\n{summary}"
+        analysis["description"] = description
+        analysis["summary"] = f"{description} — {analysis.get('summary', '')}"
 
-    # Add to context
+    # Add to context with full analysis
     ctx = _get_context(build)
     uploads = ctx.get("uploads", [])
     uploads.append({
+        **analysis,
         "name": file.filename or "unnamed",
         "type": file_type,
         "size": len(content),
-        "description": description,
-        "summary": summary[:2000],
         "uploaded_at": datetime.utcnow().isoformat(),
     })
 
     messages = _get_conversation_log(build)
     messages.append({
         "role": "system",
-        "content": f"File uploaded: {file.filename}\n{description or ''}",
+        "content": f"📎 File analyzed: {file.filename}\n{analysis.get('summary', '')}",
         "timestamp": datetime.utcnow().isoformat(),
     })
 
@@ -623,11 +646,4 @@ async def get_conversation(
     elif build.status in ("reviewing", "code_review", "qa_review"):
         phase = "reviewing"
 
-    return ConversationState(
-        build_id=build.id,
-        factory_id=build.factory_id,
-        phase=phase,
-        messages=[ConversationMessage(**m) for m in messages],
-        context=ctx,
-        ready_to_build=build.status != "interviewing",
-    )
+    return _build_conversation_state(build)

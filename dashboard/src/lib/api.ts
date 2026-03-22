@@ -265,6 +265,7 @@ export interface ConversationState {
   phase: string;
   messages: ConversationMessage[];
   context: Record<string, any>;
+  artifacts: Record<string, any> | null;
   ready_to_build: boolean;
 }
 

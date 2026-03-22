@@ -89,6 +89,13 @@ def _get_context(build: Build) -> dict:
     return (build.interview_log or {}).get("context", {})
 
 
+async def _get_tenant_api_key(tenant_id: str, db: AsyncSession) -> str | None:
+    """Get the tenant's Anthropic API key."""
+    from genesis.db.models import Tenant
+    tenant = await db.get(Tenant, tenant_id)
+    return tenant.anthropic_api_key if tenant else None
+
+
 def _build_conversation_state(build: Build, ready: bool = False) -> ConversationState:
     """Build a ConversationState with synthesized artifacts."""
     messages = _get_conversation_log(build)
@@ -247,6 +254,9 @@ async def start_conversation(
         }
     ]
 
+    # Get tenant's API key
+    api_key = await _get_tenant_api_key(current.tenant_id, db)
+
     # Get Claude's first response
     try:
         from genesis.agents.claude_client import run_agent
@@ -256,15 +266,24 @@ async def start_conversation(
             system_prompt=system_prompt,
             model="sonnet",
             max_turns=1,
+            api_key=api_key,
         )
         assistant_reply = result.result or "I'd love to help you build this! Let me ask a few questions to make sure we build exactly what you need. Who are the primary users of this application?"
     except Exception as e:
-        logger.warning("Claude not available for interview, using fallback: %s", e)
-        assistant_reply = (
-            f"Great idea! I'd love to help you build this {factory.domain} application. "
-            f"Let me ask a few questions to make sure we design it right.\n\n"
-            f"First — who are the primary users of this application, and what's their main goal?"
-        )
+        logger.warning("Claude not available: %s", e)
+        if not api_key:
+            assistant_reply = (
+                "⚠️ **Claude is not connected.** Go to Settings and add your Anthropic API key "
+                "to enable AI-powered discovery.\n\n"
+                "In the meantime, tell me about your project and I'll track what you share "
+                "in the Discovery Board on the right."
+            )
+        else:
+            assistant_reply = (
+                f"I'd love to help you build this {factory.domain} application. "
+                f"Let me ask a few questions to make sure we design it right.\n\n"
+                f"First — who are the primary users of this application, and what's their main goal?"
+            )
 
     initial_messages.append({
         "role": "assistant",
@@ -337,6 +356,9 @@ async def send_message(
         if role in ("user", "assistant"):
             claude_messages.append({"role": role, "content": m["content"]})
 
+    # Get tenant's API key
+    api_key = await _get_tenant_api_key(current.tenant_id, db)
+
     # Get Claude's response
     try:
         from genesis.agents.claude_client import run_agent
@@ -352,11 +374,15 @@ async def send_message(
             system_prompt=system_prompt,
             model="sonnet",
             max_turns=1,
+            api_key=api_key,
         )
         assistant_reply = result.result or "Could you tell me more about that?"
     except Exception as e:
         logger.warning("Claude not available: %s", e)
-        assistant_reply = "Thanks for sharing that! Could you tell me more about the user workflow you're envisioning?"
+        if not api_key:
+            assistant_reply = "⚠️ **Claude is not connected.** Add your API key in Settings to enable AI responses."
+        else:
+            assistant_reply = "Thanks for sharing that! Could you tell me more about the user workflow you're envisioning?"
 
     messages.append({
         "role": "assistant",

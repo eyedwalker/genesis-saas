@@ -100,6 +100,7 @@ from genesis.api.v1.review import router as review_router  # noqa: E402
 from genesis.api.v1.genesis import router as genesis_router  # noqa: E402
 from genesis.api.v1.conversation import router as conversation_router  # noqa: E402
 from genesis.api.v1.assistants import router as assistants_router  # noqa: E402
+from genesis.api.v1.settings import router as settings_router  # noqa: E402
 
 app.include_router(auth_router, prefix="/api/v1/auth", tags=["auth"])
 app.include_router(factories_router, prefix="/api/v1/factories", tags=["factories"])
@@ -109,3 +110,4 @@ app.include_router(review_router, prefix="/api/v1/review", tags=["review"])
 app.include_router(genesis_router, prefix="/api/v1/genesis", tags=["genesis"])
 app.include_router(conversation_router, prefix="/api/v1/conversation", tags=["conversation"])
 app.include_router(assistants_router, prefix="/api/v1/assistants", tags=["assistants"])
+app.include_router(settings_router, prefix="/api/v1/settings", tags=["settings"])

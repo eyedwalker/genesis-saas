@@ -18,10 +18,12 @@ import { BuildView } from "./BuildView";
 import { ConversationView } from "./ConversationView";
 import { AssistantPicker } from "./AssistantPicker";
 import { AssistantManager } from "./AssistantManager";
+import { SettingsPage } from "./SettingsPage";
 
 type View =
   | { type: "factories" }
   | { type: "assistants" }
+  | { type: "settings" }
   | { type: "pickAssistants"; factoryId: string; idea: string }
   | { type: "conversation"; buildId: string; state: ConversationState }
   | { type: "build"; buildId: string };
@@ -123,6 +125,12 @@ export function Dashboard() {
           >
             Assistants
           </button>
+          <button
+            onClick={() => setView({ type: "settings" })}
+            className="text-sm text-gray-500 hover:text-genesis-600 transition"
+          >
+            Settings
+          </button>
           <span className="text-sm text-gray-600">
             {user?.name} ({user?.tenant_name})
           </span>
@@ -164,6 +172,15 @@ export function Dashboard() {
               onRefresh={refresh}
             />
           </>
+        )}
+
+        {view.type === "settings" && (
+          <SettingsPage
+            onBack={() => {
+              setView({ type: "factories" });
+              refresh();
+            }}
+          />
         )}
 
         {view.type === "assistants" && (

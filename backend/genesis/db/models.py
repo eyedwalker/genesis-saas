@@ -55,6 +55,9 @@ class Tenant(Base):
     credits_limit: Mapped[float] = mapped_column(Float, default=50.0)
     max_concurrent_builds: Mapped[int] = mapped_column(Integer, default=3)
     stripe_customer_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Claude auth — API key (encrypted) or Max/Pro OAuth token path
+    anthropic_api_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    claude_auth_method: Mapped[str] = mapped_column(String(20), default="api_key")  # api_key, max_pro
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow

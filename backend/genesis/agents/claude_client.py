@@ -1,11 +1,7 @@
 """Claude Agent SDK client for pipeline agents.
 
-Uses claude-agent-sdk (claude_agent_sdk) for:
-- Built-in tools (Read, Write, Bash, Grep, etc.)
-- Subagent orchestration
-- Structured output via Pydantic models
-- Session persistence and resumption
-- Cost tracking per build
+Uses claude-agent-sdk (claude_agent_sdk) with per-tenant API key auth.
+Every call passes the tenant's ANTHROPIC_API_KEY via env.
 """
 
 from __future__ import annotations
@@ -24,7 +20,28 @@ from claude_agent_sdk import (
     query,
 )
 
+from genesis.config import settings
+
 logger = logging.getLogger(__name__)
+
+# Thread-local tenant API key (set per-request)
+_current_api_key: str | None = None
+
+
+def set_tenant_api_key(key: str | None) -> None:
+    """Set the API key for the current tenant's request."""
+    global _current_api_key
+    _current_api_key = key
+
+
+def _get_env() -> dict[str, str]:
+    """Get env vars for the Claude SDK process, including the API key."""
+    env: dict[str, str] = {}
+    # Priority: tenant key > server-level key > config key
+    key = _current_api_key or settings.anthropic_api_key
+    if key:
+        env["ANTHROPIC_API_KEY"] = key
+    return env
 
 
 async def run_agent(
@@ -37,12 +54,22 @@ async def run_agent(
     cwd: str | Path | None = None,
     output_format: dict[str, Any] | None = None,
     agents: dict[str, AgentDefinition] | None = None,
+    api_key: str | None = None,
 ) -> ResultMessage:
     """Run a Claude agent and return the result.
 
-    This is the primary interface for all pipeline agents.
-    Uses the Claude Agent SDK instead of raw API calls.
+    Uses the tenant's API key if available, falls back to server config.
     """
+    env = _get_env()
+    if api_key:
+        env["ANTHROPIC_API_KEY"] = api_key
+
+    if not env.get("ANTHROPIC_API_KEY"):
+        raise RuntimeError(
+            "No Anthropic API key configured. "
+            "Set your API key in Settings or set GENESIS_ANTHROPIC_API_KEY on the server."
+        )
+
     options = ClaudeAgentOptions(
         system_prompt=system_prompt,
         model=model,
@@ -53,6 +80,7 @@ async def run_agent(
         output_format=output_format,
         permission_mode="bypassPermissions",
         agents=agents,
+        env=env,
     )
 
     result: ResultMessage | None = None
@@ -66,6 +94,11 @@ async def run_agent(
     if result.is_error:
         raise RuntimeError(f"Agent error: {result.result}")
 
+    logger.info(
+        "Agent completed: %d turns, $%.4f",
+        result.num_turns,
+        result.total_cost_usd or 0,
+    )
     return result
 
 
@@ -77,8 +110,9 @@ async def run_agent_structured(
     tools: list[str] | None = None,
     max_turns: int | None = None,
     cwd: str | Path | None = None,
+    api_key: str | None = None,
 ) -> Any:
-    """Run an agent and return structured (JSON) output validated against a schema."""
+    """Run an agent and return structured (JSON) output."""
     result = await run_agent(
         prompt=prompt,
         system_prompt=system_prompt,
@@ -87,12 +121,12 @@ async def run_agent_structured(
         max_turns=max_turns,
         cwd=cwd,
         output_format={"type": "json_schema", "schema": output_schema},
+        api_key=api_key,
     )
 
     if result.structured_output is not None:
         return result.structured_output
 
-    # Fallback: parse from text result
     if result.result:
         return parse_llm_json(result.result, "agent")
 
@@ -106,13 +140,9 @@ async def run_builder_agent(
     workspace_dir: str | Path | None = None,
     max_turns: int = 20,
     max_budget_usd: float = 5.0,
+    api_key: str | None = None,
 ) -> ResultMessage:
-    """Run a builder agent with full file system access.
-
-    The builder gets Read, Write, Edit, Bash, Glob, Grep tools
-    so it can actually create files, run tests, and self-heal.
-    """
-    # Create a temp workspace if none provided
+    """Run a builder agent with full file system access."""
     if workspace_dir is None:
         workspace_dir = Path(tempfile.mkdtemp(prefix="genesis-build-"))
 
@@ -127,17 +157,16 @@ async def run_builder_agent(
         max_turns=max_turns,
         max_budget_usd=max_budget_usd,
         cwd=workspace,
+        api_key=api_key,
     )
 
 
 def parse_llm_json(text: str, agent_name: str = "agent") -> Any:
     """Parse JSON from LLM response, handling common issues."""
-    # Strip markdown fences
     text = re.sub(r"```(?:json)?\s*", "", text)
     text = re.sub(r"```\s*$", "", text)
     text = text.strip()
 
-    # Find JSON start
     for start_char in ("{", "["):
         idx = text.find(start_char)
         if idx != -1:
@@ -151,7 +180,6 @@ def parse_llm_json(text: str, agent_name: str = "agent") -> Any:
     except json.JSONDecodeError:
         pass
 
-    # Repair truncated JSON
     if json_str.count('"') % 2 != 0:
         json_str += '"'
     open_braces = json_str.count("{") - json_str.count("}")

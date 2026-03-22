@@ -192,6 +192,7 @@ class Build(Base):
     exported_branch: Mapped[str | None] = mapped_column(String(255), nullable=True)
     pr_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     workspace_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    session_id: Mapped[str | None] = mapped_column(String(100), nullable=True)  # Claude SDK session
     provisioned_agents: Mapped[dict[str, Any] | None] = mapped_column(
         _JSON, nullable=True
     )

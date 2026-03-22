@@ -305,7 +305,7 @@ async def start_conversation(
     db.add(build)
     await db.flush()
 
-    # Initialize conversation with Claude's first response
+    # Initialize conversation with Claude using a PERSISTENT SESSION
     system_prompt = _build_system_prompt(factory, build)
     initial_messages = [
         {
@@ -315,28 +315,31 @@ async def start_conversation(
         }
     ]
 
-    # Get tenant's API key
     api_key = await _get_tenant_api_key(current.tenant_id, db)
 
-    # Get Claude's first response
+    # Create a new Claude session — this session persists across messages
     try:
         from genesis.agents.claude_client import run_agent
 
         result = await run_agent(
-            prompt=f"A user wants to build: {body.initial_idea}\n\nThis is a {factory.domain} project using {factory.tech_stack or 'Python/FastAPI'}.\n\nStart by acknowledging their idea, then ask your first discovery question.",
+            prompt=(
+                f"I want to build: {body.initial_idea}\n\n"
+                f"This is a {factory.domain} project using {factory.tech_stack or 'TBD'}.\n\n"
+                f"Start a natural discovery conversation with me. Acknowledge my idea, "
+                f"share your initial thoughts, then ask me ONE good question to get started."
+            ),
             system_prompt=system_prompt,
             model="sonnet",
             max_turns=1,
             api_key=api_key,
         )
-        assistant_reply = result.result or "I'd love to help you build this! Let me ask a few questions to make sure we build exactly what you need. Who are the primary users of this application?"
+        assistant_reply = result.result or "Tell me more about what you want to build."
+        # Store the session ID for future messages
+        build.session_id = result.session_id
+        logger.info("Created Claude session: %s", result.session_id)
     except Exception as e:
         logger.error("Claude failed: %s", e)
-        assistant_reply = (
-            "⚠️ **Claude connection issue.** Check Settings to ensure your API key is set, "
-            "or run `claude login` on the server for Max/Pro.\n\n"
-            f"Error: {str(e)[:150]}"
-        )
+        assistant_reply = f"⚠️ Claude connection issue: {str(e)[:150]}"
 
     initial_messages.append({
         "role": "assistant",
@@ -401,60 +404,35 @@ async def send_message(
 
     messages.append(user_msg)
 
-    # Build conversation for Claude — include EVERYTHING Claude needs
-    system_prompt = _build_system_prompt(factory, build)
-    ctx = _get_context(build)
-
-    # Build rich context block with all reference materials
-    context_block = _build_context_block(ctx)
-
-    # Build proper multi-turn conversation
-    # Include system messages (scans, uploads) as user context
-    conversation_parts = []
-    for m in messages:
-        role = m.get("role", "user")
-        content = m.get("content", "")
-        if role == "system":
-            # System messages (scans, uploads) → inject as user context
-            conversation_parts.append(f"[System Update: {content}]")
-        elif role == "user":
-            conversation_parts.append(f"User: {content}")
-        elif role == "assistant":
-            conversation_parts.append(f"You (Claude): {content}")
-
-    convo_text = "\n\n".join(conversation_parts)
-
-    # Get tenant's API key
     api_key = await _get_tenant_api_key(current.tenant_id, db)
 
-    # Build the full prompt with context + conversation
-    full_prompt = f"""Here is the complete discovery conversation so far, including all reference materials the user has shared:
-
-{context_block}
-
---- CONVERSATION ---
-{convo_text}
---- END CONVERSATION ---
-
-Continue the discovery conversation. You MUST:
-1. Remember and reference EVERYTHING discussed above
-2. Reference any uploaded files or scanned websites by name
-3. Build on what you've already learned — don't repeat questions
-4. Ask your next question or, if you have enough context, say you're ready to generate requirements
-5. Be specific — reference details from previous messages"""
-
-    # Get Claude's response
+    # RESUME the existing Claude session — Claude remembers everything naturally
     try:
-        from genesis.agents.claude_client import run_agent
+        from genesis.agents.claude_client import run_agent_session
 
-        result = await run_agent(
-            prompt=full_prompt,
-            system_prompt=system_prompt,
+        # Just send the user's message — Claude has full context from the session
+        prompt = body.message
+
+        # If there are new attachments, include them in the message
+        if body.attachments:
+            att_text = "\n".join(
+                f"[Attached: {a.get('name', 'file')} — {a.get('content', '')[:1000]}]"
+                for a in body.attachments
+            )
+            prompt = f"{body.message}\n\n{att_text}"
+
+        result = await run_agent_session(
+            prompt=prompt,
+            session_id=build.session_id,  # Resume the persistent session
             model="sonnet",
             max_turns=1,
             api_key=api_key,
         )
         assistant_reply = result.result or "Could you tell me more about that?"
+
+        # Update session_id in case it changed
+        if result.session_id:
+            build.session_id = result.session_id
     except Exception as e:
         logger.error("Claude failed on message: %s", e)
         assistant_reply = f"⚠️ Claude connection issue: {str(e)[:150]}"
@@ -548,6 +526,31 @@ async def scan_website(
 
     _save_conversation(build, messages, {"scans": scans})
     await db.flush()
+
+    # Tell Claude about the scan in the same session so it knows
+    if build.session_id:
+        try:
+            from genesis.agents.claude_client import run_agent_session
+            api_key = await _get_tenant_api_key(current.tenant_id, db)
+
+            scan_msg = f"I just scanned a reference website for you:\n\n{scan_summary}\n\nKeep this in mind as we continue designing the app. How does this influence what we should build?"
+            result = await run_agent_session(
+                prompt=scan_msg,
+                session_id=build.session_id,
+                model="sonnet",
+                max_turns=1,
+                api_key=api_key,
+            )
+            if result.result:
+                messages.append({
+                    "role": "assistant",
+                    "content": result.result,
+                    "timestamp": datetime.utcnow().isoformat(),
+                })
+                _save_conversation(build, messages)
+                await db.flush()
+        except Exception as e:
+            logger.warning("Failed to notify Claude of scan: %s", e)
 
     return _build_conversation_state(build)
 

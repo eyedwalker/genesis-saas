@@ -98,6 +98,60 @@ async def run_agent(
     return result
 
 
+async def run_agent_session(
+    prompt: str,
+    session_id: str | None = None,
+    model: str = "sonnet",
+    max_turns: int | None = None,
+    api_key: str | None = None,
+) -> ResultMessage:
+    """Resume an existing Claude session — Claude remembers everything.
+
+    This is the key to natural conversation. Instead of reconstructing
+    context, we just resume the session and send the new message.
+    Claude has full memory of everything said before.
+    """
+    env = _get_env()
+    if api_key:
+        env["ANTHROPIC_API_KEY"] = api_key
+
+    options = ClaudeAgentOptions(
+        model=model,
+        max_turns=max_turns,
+        permission_mode="bypassPermissions",
+        env=env,
+    )
+
+    # Resume existing session if we have one
+    if session_id:
+        options = ClaudeAgentOptions(
+            model=model,
+            max_turns=max_turns,
+            permission_mode="bypassPermissions",
+            resume=session_id,
+            env=env,
+        )
+
+    result: ResultMessage | None = None
+    async for message in query(prompt=prompt, options=options):
+        if isinstance(message, ResultMessage):
+            result = message
+
+    if result is None:
+        raise RuntimeError("Agent returned no result")
+
+    if result.is_error:
+        raise RuntimeError(f"Agent error: {result.result}")
+
+    logger.info(
+        "Session %s: %d turns, $%.4f",
+        result.session_id[:8] if result.session_id else "new",
+        result.num_turns,
+        result.total_cost_usd or 0,
+    )
+    return result
+
+
 async def run_agent_structured(
     prompt: str,
     output_schema: dict[str, Any],

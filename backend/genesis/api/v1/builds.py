@@ -204,6 +204,30 @@ async def get_build(
     return _build_response(build, detail=True)
 
 
+@router.delete("/{build_id}", status_code=204)
+async def delete_build(
+    build_id: str,
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """Delete a build and all associated data (activities, comments, etc.)."""
+    build, factory = await _get_build_with_tenant_check(
+        build_id, current.tenant_id, db
+    )
+
+    # Delete associated records first
+    from genesis.db.models import Activity, Approval, BuildComment, WorkItem, Document
+    from sqlalchemy import delete
+
+    for model in [Activity, Approval, BuildComment, WorkItem, Document]:
+        await db.execute(
+            delete(model).where(model.build_id == build_id)
+        )
+
+    await db.delete(build)
+    await db.flush()
+
+
 @router.post("/{build_id}/advance", response_model=BuildResponse)
 async def advance_build(
     build_id: str,

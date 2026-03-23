@@ -194,6 +194,10 @@ export async function getBuild(id: string) {
   return request<Build>(`/api/v1/builds/${id}`);
 }
 
+export async function deleteBuild(id: string) {
+  return request<void>(`/api/v1/builds/${id}`, { method: "DELETE" });
+}
+
 export async function advanceBuild(id: string, fastTrack = false) {
   return request<Build>(`/api/v1/builds/${id}/advance`, {
     method: "POST",

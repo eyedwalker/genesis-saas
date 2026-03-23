@@ -98,39 +98,53 @@ async def run_agent(
     return result
 
 
-async def run_agent_session(
-    prompt: str,
-    session_id: str | None = None,
+async def run_conversation(
+    messages: list[dict[str, str]],
+    new_message: str,
+    system_prompt: str | None = None,
     model: str = "sonnet",
-    max_turns: int | None = None,
+    max_turns: int | None = 1,
     api_key: str | None = None,
 ) -> ResultMessage:
-    """Resume an existing Claude session — Claude remembers everything.
+    """Run a conversation turn with full message history.
 
-    This is the key to natural conversation. Instead of reconstructing
-    context, we just resume the session and send the new message.
-    Claude has full memory of everything said before.
+    Instead of fragile session resume, we send the complete conversation
+    history + the new message as a single prompt. Claude sees everything
+    and responds naturally. This survives container restarts.
     """
     env = _get_env()
     if api_key:
         env["ANTHROPIC_API_KEY"] = api_key
 
+    # Build conversation history as natural dialogue
+    history_parts = []
+    for msg in messages:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        if role == "user":
+            history_parts.append(f"User: {content}")
+        elif role == "assistant":
+            history_parts.append(f"You: {content}")
+        elif role == "system":
+            history_parts.append(f"[Context: {content}]")
+
+    if history_parts:
+        prompt = (
+            "Here is our conversation so far:\n\n"
+            + "\n\n".join(history_parts)
+            + f"\n\nUser: {new_message}"
+            + "\n\nContinue the conversation naturally. Reference everything discussed. Don't repeat what you already know."
+        )
+    else:
+        prompt = new_message
+
     options = ClaudeAgentOptions(
+        system_prompt=system_prompt,
         model=model,
         max_turns=max_turns,
         permission_mode="bypassPermissions",
         env=env,
     )
-
-    # Resume existing session if we have one
-    if session_id:
-        options = ClaudeAgentOptions(
-            model=model,
-            max_turns=max_turns,
-            permission_mode="bypassPermissions",
-            resume=session_id,
-            env=env,
-        )
 
     result: ResultMessage | None = None
     async for message in query(prompt=prompt, options=options):
@@ -144,8 +158,7 @@ async def run_agent_session(
         raise RuntimeError(f"Agent error: {result.result}")
 
     logger.info(
-        "Session %s: %d turns, $%.4f",
-        result.session_id[:8] if result.session_id else "new",
+        "Conversation: %d turns, $%.4f",
         result.num_turns,
         result.total_cost_usd or 0,
     )

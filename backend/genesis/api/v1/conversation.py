@@ -305,7 +305,7 @@ async def start_conversation(
     db.add(build)
     await db.flush()
 
-    # Initialize conversation with Claude using a PERSISTENT SESSION
+    # Start the discovery conversation
     system_prompt = _build_system_prompt(factory, build)
     initial_messages = [
         {
@@ -317,12 +317,12 @@ async def start_conversation(
 
     api_key = await _get_tenant_api_key(current.tenant_id, db)
 
-    # Create a new Claude session — this session persists across messages
     try:
-        from genesis.agents.claude_client import run_agent
+        from genesis.agents.claude_client import run_conversation
 
-        result = await run_agent(
-            prompt=(
+        result = await run_conversation(
+            messages=[],  # No history yet
+            new_message=(
                 f"I want to build: {body.initial_idea}\n\n"
                 f"This is a {factory.domain} project using {factory.tech_stack or 'TBD'}.\n\n"
                 f"Start a natural discovery conversation with me. Acknowledge my idea, "
@@ -330,15 +330,11 @@ async def start_conversation(
             ),
             system_prompt=system_prompt,
             model="sonnet",
-            max_turns=1,
             api_key=api_key,
         )
         assistant_reply = result.result or "Tell me more about what you want to build."
-        # Store the session ID for future messages
-        build.session_id = result.session_id
-        logger.info("Created Claude session: %s", result.session_id)
     except Exception as e:
-        logger.error("Claude failed: %s", e)
+        logger.error("Claude failed on start: %s", e)
         assistant_reply = f"⚠️ Claude connection issue: {str(e)[:150]}"
 
     initial_messages.append({
@@ -406,33 +402,36 @@ async def send_message(
 
     api_key = await _get_tenant_api_key(current.tenant_id, db)
 
-    # RESUME the existing Claude session — Claude remembers everything naturally
+    # Send message with FULL conversation history — Claude sees everything
     try:
-        from genesis.agents.claude_client import run_agent_session
+        from genesis.agents.claude_client import run_conversation
 
-        # Just send the user's message — Claude has full context from the session
-        prompt = body.message
+        system_prompt = _build_system_prompt(factory, build)
+        ctx = _get_context(build)
+        context_block = _build_context_block(ctx)
 
-        # If there are new attachments, include them in the message
+        # Include reference materials in system prompt
+        full_system = system_prompt
+        if context_block and context_block != "(No reference materials shared yet)":
+            full_system += f"\n\nReference materials the user has shared:\n{context_block}"
+
+        # Build user message with any attachments
+        user_text = body.message
         if body.attachments:
             att_text = "\n".join(
-                f"[Attached: {a.get('name', 'file')} — {a.get('content', '')[:1000]}]"
+                f"[Attached: {a.get('name', 'file')} — {a.get('content', '')[:2000]}]"
                 for a in body.attachments
             )
-            prompt = f"{body.message}\n\n{att_text}"
+            user_text = f"{body.message}\n\n{att_text}"
 
-        result = await run_agent_session(
-            prompt=prompt,
-            session_id=build.session_id,  # Resume the persistent session
+        result = await run_conversation(
+            messages=messages[:-1],  # History (exclude the message we just appended)
+            new_message=user_text,
+            system_prompt=full_system,
             model="sonnet",
-            max_turns=1,
             api_key=api_key,
         )
         assistant_reply = result.result or "Could you tell me more about that?"
-
-        # Update session_id in case it changed
-        if result.session_id:
-            build.session_id = result.session_id
     except Exception as e:
         logger.error("Claude failed on message: %s", e)
         assistant_reply = f"⚠️ Claude connection issue: {str(e)[:150]}"
@@ -583,15 +582,20 @@ async def upload_attachment(
     file_type = file.content_type or "application/octet-stream"
     is_image = file_type.startswith("image/")
 
-    # Analyze the file content
-    from genesis.pipeline.discovery_engine import analyze_file
+    # Analyze the file content — handles text, Excel, images
+    from genesis.pipeline.discovery_engine import analyze_file_text, analyze_file_binary
 
-    text_content = content.decode("utf-8", errors="replace") if not is_image else ""
-    analysis = analyze_file(text_content, file.filename or "unnamed", file_type)
+    is_binary = is_image or file_type in (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel",
+        "application/pdf",
+    ) or (file.filename or "").endswith((".xlsx", ".xls", ".pdf"))
 
-    if is_image:
-        analysis["summary"] = f"Image: {file.filename} ({file_type}, {len(content):,} bytes)"
-        analysis["format"] = "image"
+    if is_binary:
+        analysis = analyze_file_binary(content, file.filename or "unnamed", file_type)
+    else:
+        text_content = content.decode("utf-8", errors="replace")
+        analysis = analyze_file_text(text_content, file.filename or "unnamed", file_type)
 
     if description:
         analysis["description"] = description

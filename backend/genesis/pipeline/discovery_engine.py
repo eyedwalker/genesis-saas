@@ -1,17 +1,11 @@
 """Discovery Engine — the brain behind the guided build conversation.
 
-This replaces the naive chat + keyword matching with real AI-powered discovery:
-1. Website scanning: fetches pages, extracts features/tech/design patterns
-2. File analysis: reads uploads, extracts structure and content
-3. Running synthesis: after every few messages, produces updated artifacts
-4. Artifact generation: personas, feature lists, constraints, user stories
-
-Uses Claude Agent SDK with WebFetch for scanning and structured output
-for artifact generation.
+Real website scanning, file analysis (including Excel/images), and synthesis.
 """
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import re
@@ -25,15 +19,11 @@ from genesis.config import settings
 logger = logging.getLogger(__name__)
 
 
-# ── Website Scanner (no Claude needed) ────────────────────────────────────────
+# ── Website Scanner ───────────────────────────────────────────────────────────
 
 
 async def scan_website(url: str) -> dict[str, Any]:
-    """Fetch a website and extract meaningful information.
-
-    This does real HTTP fetching and HTML analysis — no Claude needed.
-    Returns structured data about the site.
-    """
+    """Fetch a website and extract meaningful information."""
     result: dict[str, Any] = {
         "url": url,
         "hostname": urlparse(url).hostname or "",
@@ -57,25 +47,15 @@ async def scan_website(url: str) -> dict[str, Any]:
 
             result["status"] = "success"
 
-            # Extract title
             title_match = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
             result["title"] = title_match.group(1).strip() if title_match else ""
 
-            # Extract meta description
             desc_match = re.search(
                 r'<meta[^>]*name=["\']description["\'][^>]*content=["\'](.*?)["\']',
                 html, re.IGNORECASE,
             )
             result["description"] = desc_match.group(1).strip() if desc_match else ""
 
-            # Extract meta keywords
-            kw_match = re.search(
-                r'<meta[^>]*name=["\']keywords["\'][^>]*content=["\'](.*?)["\']',
-                html, re.IGNORECASE,
-            )
-            result["keywords"] = kw_match.group(1).strip() if kw_match else ""
-
-            # Detect tech stack
             tech = []
             tech_patterns = {
                 "React": r"react|__next|_next/static|reactroot",
@@ -86,18 +66,14 @@ async def scan_website(url: str) -> dict[str, Any]:
                 "Bootstrap": r"bootstrap\.css|bootstrap\.min",
                 "WordPress": r"wp-content|wp-includes",
                 "Shopify": r"shopify|cdn\.shopify",
-                "Webflow": r"webflow\.js|wf-design",
                 "Stripe": r"stripe\.js|js\.stripe\.com",
                 "Google Analytics": r"google-analytics|gtag|ga\.js",
-                "Intercom": r"intercom|widget\.intercom",
-                "HubSpot": r"hubspot|hs-scripts",
             }
             for name, pattern in tech_patterns.items():
                 if re.search(pattern, html, re.IGNORECASE):
                     tech.append(name)
             result["tech_stack"] = tech
 
-            # Extract navigation links (main features)
             nav_links = re.findall(
                 r'<a[^>]*href=["\'](/[^"\'#]*)["\'][^>]*>(.*?)</a>',
                 html, re.IGNORECASE | re.DOTALL,
@@ -109,7 +85,6 @@ async def scan_website(url: str) -> dict[str, Any]:
                     features.append({"path": href, "label": clean})
             result["navigation"] = features[:20]
 
-            # Extract headings (key messages)
             headings = []
             for tag in ["h1", "h2"]:
                 for match in re.finditer(
@@ -120,18 +95,14 @@ async def scan_website(url: str) -> dict[str, Any]:
                         headings.append(clean)
             result["headings"] = headings[:10]
 
-            # Extract colors from inline styles and CSS
             colors = set(re.findall(r"#[0-9a-fA-F]{6}", html))
             result["colors"] = sorted(colors)[:10]
-
-            # Count pages/sections
             result["content_length"] = len(html)
             result["has_forms"] = bool(re.search(r"<form", html, re.IGNORECASE))
             result["has_login"] = bool(re.search(r"login|sign.?in|log.?in", html, re.IGNORECASE))
             result["has_pricing"] = bool(re.search(r"pricing|plans|subscribe", html, re.IGNORECASE))
             result["has_api_docs"] = bool(re.search(r"api|developer|documentation", html, re.IGNORECASE))
 
-            # Build summary
             summary_parts = []
             if result["title"]:
                 summary_parts.append(f"**{result['title']}**")
@@ -157,11 +128,11 @@ async def scan_website(url: str) -> dict[str, Any]:
     return result
 
 
-# ── File Analyzer (no Claude needed) ──────────────────────────────────────────
+# ── File Analyzer ─────────────────────────────────────────────────────────────
 
 
-def analyze_file(content: str, filename: str, file_type: str) -> dict[str, Any]:
-    """Analyze uploaded file content and extract structured information."""
+def analyze_file_text(content: str, filename: str, file_type: str) -> dict[str, Any]:
+    """Analyze text-based file content."""
     result: dict[str, Any] = {
         "filename": filename,
         "type": file_type,
@@ -178,6 +149,9 @@ def analyze_file(content: str, filename: str, file_type: str) -> dict[str, Any]:
             result["summary"] = f"CSV with {len(headers)} columns, {len(lines)-1} rows: {', '.join(headers[:8])}"
             if len(headers) > 8:
                 result["summary"] += f" (+{len(headers)-8} more)"
+            # Sample data
+            if len(lines) > 1:
+                result["sample_rows"] = lines[1:min(4, len(lines))]
 
     elif file_type == "application/json" or filename.endswith(".json"):
         try:
@@ -203,17 +177,113 @@ def analyze_file(content: str, filename: str, file_type: str) -> dict[str, Any]:
         result["word_count"] = words
         result["line_count"] = len(lines)
         result["headings"] = headings[:10]
-        result["summary"] = f"{'Markdown' if filename.endswith('.md') else 'Text'} document: {words} words, {len(lines)} lines"
+        result["summary"] = f"{'Markdown' if filename.endswith('.md') else 'Text'}: {words} words, {len(lines)} lines"
         if headings:
             result["summary"] += f". Sections: {', '.join(h.lstrip('#').strip() for h in headings[:5])}"
-        # First 500 chars as preview
-        result["preview"] = content[:500]
+        result["preview"] = content[:1000]
+
+    else:
+        result["format"] = "text"
+        result["summary"] = f"Text file: {filename} ({len(content)} chars)"
+        result["preview"] = content[:1000]
+
+    return result
+
+
+def analyze_file_binary(content: bytes, filename: str, file_type: str) -> dict[str, Any]:
+    """Analyze binary file content (Excel, images, etc.)."""
+    result: dict[str, Any] = {
+        "filename": filename,
+        "type": file_type,
+        "size": len(content),
+    }
+
+    # Excel files
+    if filename.endswith((".xlsx", ".xls")) or file_type in (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel",
+    ):
+        try:
+            import openpyxl
+            wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+            sheets = wb.sheetnames
+            result["format"] = "excel"
+            result["sheets"] = sheets
+
+            all_data = []
+            for sheet_name in sheets[:3]:  # Max 3 sheets
+                ws = wb[sheet_name]
+                rows = list(ws.iter_rows(max_row=min(ws.max_row or 1, 50), values_only=True))
+                if rows:
+                    headers = [str(c) if c else f"col_{i}" for i, c in enumerate(rows[0])]
+                    data_rows = rows[1:min(6, len(rows))]  # Sample 5 rows
+                    all_data.append({
+                        "sheet": sheet_name,
+                        "columns": headers,
+                        "row_count": (ws.max_row or 1) - 1,
+                        "col_count": len(headers),
+                        "sample": [
+                            {h: str(v) if v is not None else "" for h, v in zip(headers, row)}
+                            for row in data_rows
+                        ],
+                    })
+            wb.close()
+
+            result["sheet_data"] = all_data
+            # Build summary
+            total_rows = sum(s["row_count"] for s in all_data)
+            total_cols = sum(s["col_count"] for s in all_data)
+            result["columns"] = all_data[0]["columns"] if all_data else []
+            result["row_count"] = total_rows
+
+            sheet_summaries = []
+            for s in all_data:
+                sheet_summaries.append(
+                    f"Sheet '{s['sheet']}': {s['row_count']} rows, {s['col_count']} columns ({', '.join(s['columns'][:6])})"
+                )
+            result["summary"] = f"Excel workbook with {len(sheets)} sheet(s), {total_rows} total rows. " + "; ".join(sheet_summaries)
+
+            # Build a text preview for Claude
+            preview_parts = []
+            for s in all_data:
+                preview_parts.append(f"\n--- Sheet: {s['sheet']} ({s['row_count']} rows) ---")
+                preview_parts.append("Columns: " + ", ".join(s["columns"]))
+                for row in s.get("sample", [])[:3]:
+                    preview_parts.append(str(row))
+            result["preview"] = "\n".join(preview_parts)
+
+        except Exception as e:
+            result["format"] = "excel"
+            result["summary"] = f"Excel file: {filename} (failed to read: {str(e)[:100]})"
+            logger.warning("Excel parse error: %s", e)
+
+    # Images
+    elif file_type.startswith("image/"):
+        result["format"] = "image"
+        img_type = file_type.split("/")[-1].upper()
+        result["summary"] = f"Image ({img_type}, {len(content):,} bytes)"
+        # Store base64 so Claude can analyze it later
+        import base64
+        result["base64"] = base64.b64encode(content).decode()
+        result["preview"] = f"[Image: {filename} — {img_type} format, {len(content):,} bytes. Claude can analyze this image for UI/UX reference.]"
+
+    # PDF
+    elif filename.endswith(".pdf") or file_type == "application/pdf":
+        result["format"] = "pdf"
+        result["summary"] = f"PDF document: {filename} ({len(content):,} bytes)"
+        result["preview"] = "[PDF document — text extraction requires additional processing]"
 
     else:
         result["format"] = "binary"
-        result["summary"] = f"File: {filename} ({file_type}, {len(content)} bytes)"
+        result["summary"] = f"Binary file: {filename} ({file_type}, {len(content):,} bytes)"
 
     return result
+
+
+# Legacy wrapper
+def analyze_file(content: str, filename: str, file_type: str) -> dict[str, Any]:
+    """Analyze text file content (backward compatible)."""
+    return analyze_file_text(content, filename, file_type)
 
 
 # ── Synthesis Engine ──────────────────────────────────────────────────────────
@@ -223,14 +293,7 @@ def synthesize_discovery(
     messages: list[dict],
     context: dict[str, Any],
 ) -> dict[str, Any]:
-    """Synthesize all discovery data into structured artifacts.
-
-    Analyzes conversation messages, uploaded files, and scanned websites
-    to produce running artifacts: personas, features, constraints, etc.
-
-    This is a deterministic extraction — no Claude needed.
-    Claude enhances it when available, but the basics always work.
-    """
+    """Synthesize all discovery data into structured artifacts."""
     user_messages = [m["content"] for m in messages if m.get("role") == "user"]
     assistant_messages = [m["content"] for m in messages if m.get("role") == "assistant"]
     all_text = " ".join(user_messages + assistant_messages).lower()
@@ -253,21 +316,18 @@ def synthesize_discovery(
         (r"(?:staff|employee|team.?member|worker)", "Staff Member"),
         (r"(?:vendor|supplier|partner)", "Vendor/Partner"),
         (r"(?:receptionist|front.?desk|secretary)", "Receptionist"),
+        (r"(?:florist|designer|artist)", "Florist/Designer"),
+        (r"(?:bride|groom|couple|wedding)", "Wedding Client"),
     ]
     for pattern, label in persona_keywords:
         if re.search(pattern, all_text):
-            # Find context around this persona
             for msg in user_messages:
                 match = re.search(rf"(.{{0,100}}{pattern}.{{0,100}})", msg.lower())
                 if match:
-                    personas.append({
-                        "role": label,
-                        "context": match.group(1).strip(),
-                    })
+                    personas.append({"role": label, "context": match.group(1).strip()})
                     break
             else:
                 personas.append({"role": label, "context": ""})
-
     artifacts["personas"] = personas
 
     # ── Extract Features ──
@@ -321,7 +381,7 @@ def synthesize_discovery(
                     problems.append(prob)
     artifacts["problems"] = problems[:8]
 
-    # ── Discovery Progress ──
+    # ── Progress ──
     progress = {
         "personas_identified": len(personas) > 0,
         "problems_defined": len(problems) > 0,
@@ -357,6 +417,7 @@ def synthesize_discovery(
             "columns": u.get("columns"),
             "row_count": u.get("row_count"),
             "preview": u.get("preview", "")[:300],
+            "format": u.get("format", ""),
         }
         for u in uploads
     ]

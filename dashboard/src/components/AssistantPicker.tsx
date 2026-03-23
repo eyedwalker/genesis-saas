@@ -142,7 +142,13 @@ export function AssistantPicker({
           </h2>
           <p className="text-sm text-gray-500 mt-1">
             Select the AI assistants that will guide discovery and review code
-            for: <span className="font-medium text-gray-700">{initialIdea}</span>
+            {initialIdea.length > 80 ? (
+              <span className="font-medium text-gray-700 block mt-1 truncate max-w-xl" title={initialIdea}>
+                {initialIdea.slice(0, 80)}...
+              </span>
+            ) : (
+              <span className="font-medium text-gray-700"> for: {initialIdea}</span>
+            )}
           </p>
         </div>
 

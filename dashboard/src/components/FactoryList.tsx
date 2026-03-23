@@ -7,6 +7,7 @@ import {
   listBuilds,
   createBuild,
   deleteBuild,
+  deleteFactory,
 } from "@/lib/api";
 
 const STAGE_COLORS: Record<string, string> = {
@@ -111,6 +112,19 @@ function FactoryCard({
             >
               {factory.status}
             </span>
+            <button
+              onClick={async (e) => {
+                e.stopPropagation();
+                if (confirm(`Delete factory "${factory.name}" and ALL its builds?`)) {
+                  await deleteFactory(factory.id);
+                  onRefresh();
+                }
+              }}
+              className="text-gray-300 hover:text-red-500 transition p-1"
+              title="Delete factory"
+            >
+              ✕
+            </button>
             <span className="text-gray-300">
               {expanded ? "▲" : "▼"}
             </span>

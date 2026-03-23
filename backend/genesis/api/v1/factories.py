@@ -219,9 +219,31 @@ async def delete_factory(
     current: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ):
-    """Archive a factory (soft delete)."""
+    """Delete a factory and ALL its builds + associated data."""
+    from genesis.db.models import Activity, Approval, BuildComment, WorkItem, Document, FactoryMember, Invitation
+    from sqlalchemy import delete
+
     factory = await db.get(Factory, factory_id)
     if not factory or factory.tenant_id != current.tenant_id:
         raise HTTPException(404, "Factory not found")
-    factory.status = "archived"
+
+    # Get all build IDs for this factory
+    build_ids_result = await db.execute(
+        select(Build.id).where(Build.factory_id == factory_id)
+    )
+    build_ids = [r[0] for r in build_ids_result.all()]
+
+    # Delete all build-related data
+    if build_ids:
+        for model in [Activity, Approval, BuildComment, WorkItem, Document]:
+            await db.execute(
+                delete(model).where(model.build_id.in_(build_ids))
+            )
+        await db.execute(delete(Build).where(Build.factory_id == factory_id))
+
+    # Delete factory-related data
+    await db.execute(delete(FactoryMember).where(FactoryMember.factory_id == factory_id))
+    await db.execute(delete(Invitation).where(Invitation.factory_id == factory_id))
+
+    await db.delete(factory)
     await db.flush()

@@ -151,6 +151,10 @@ export async function getFactory(id: string) {
   return request<Factory>(`/api/v1/factories/${id}`);
 }
 
+export async function deleteFactory(id: string) {
+  return request<void>(`/api/v1/factories/${id}`, { method: "DELETE" });
+}
+
 // ── Builds ───────────────────────────────────────────────────────────────────
 
 export interface Build {
